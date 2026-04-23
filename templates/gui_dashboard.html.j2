@@ -1,0 +1,268 @@
+{% extends "gui_base.html.j2" %}
+{% import "gui_primitives.html.j2" as ui %}
+{% set page_title = "Dashboard" %}
+{% block content %}
+  {% set snapshot = latest_snapshot %}
+  {% set power = team_power %}
+  {% set rankings = rankings_status if rankings_status is defined else {"rankings_count": 0} %}
+  {% set analysis_view = analysis if analysis is defined else {"headline": "", "cards": []} %}
+  {% call ui.page_intro("Overview", "Current Team Status", "Official team status stays front and center, with division-wide context available in Rankings.") %}
+    <a class="header-action" href="{{ '/rankings' if not static_site else 'rankings/' }}">Open Rankings</a>
+    <a class="header-action" href="{{ '/ai-rankings' if not static_site else 'ai-rankings/' }}">Open AI Rankings</a>
+    <a class="header-action" href="{{ '/analysis' if not static_site else 'analysis/' }}">Open Analysis</a>
+    <a class="header-action" href="{{ '/media' if not static_site else 'media/' }}">Open Media</a>
+  {% endcall %}
+
+  {{ ui.metric_grid([
+    {"label": "Official Rank", "value": snapshot.rank if snapshot else "N/A"},
+    {"label": "Power Rank", "value": power.power_rank if power else "N/A"},
+    {"label": "Record", "value": snapshot.record_text if snapshot else "Unknown"},
+    {"label": "Skills Total", "value": team_skill.total_score if team_skill else "N/A"},
+    {"label": "Rankings Loaded", "value": rankings.rankings_count},
+    {"label": "Source", "value": rankings.snapshot_source or "Unknown"},
+    {"label": "Source Updated", "value": rankings.source_updated_at or "Unknown"},
+  ]) }}
+
+  <div class="split">
+    <section class="surface-stack">
+      <div class="summary-card">
+        {{ ui.section_header("Analysis", "AI-Style Summary", "Automated commentary based on the data we actually have, not the data we wish RobotEvents would hand over.") }}
+        <div class="muted-panel">{{ analysis_view.headline or "No analysis available yet." }}</div>
+      </div>
+      <div class="summary-card">
+        {{ ui.section_header("Competition", "Snapshot Summary", "Latest official team status from RobotEvents or the HTML fallback.") }}
+        {% if snapshot %}
+          <table class="list-table">
+            <tbody>
+              <tr><th>Event</th><td>{{ snapshot.event_name }}</td></tr>
+              <tr><th>Division</th><td>{{ snapshot.division_name }}</td></tr>
+              <tr><th>Team</th><td>{{ snapshot.team_number }} · {{ snapshot.team_name }}</td></tr>
+              <tr><th>School</th><td>{{ snapshot.school_name }}</td></tr>
+              <tr><th>WP / AP / SP</th><td>{{ snapshot.wp }} / {{ snapshot.ap }} / {{ snapshot.sp }}</td></tr>
+              <tr><th>Average Score</th><td>{{ snapshot.average_score or "N/A" }}</td></tr>
+              <tr><th>Last Fetch</th><td>{{ snapshot.fetched_at }}</td></tr>
+              <tr><th>Source</th><td>{{ snapshot.source }}</td></tr>
+            </tbody>
+          </table>
+        {% else %}
+          <div class="muted-panel">No competition data yet.</div>
+        {% endif %}
+      </div>
+
+      <div class="summary-card">
+        {{ ui.section_header("Derived", "Power Snapshot", "Computed metrics stay clearly separate from official standings.") }}
+        {% if power %}
+          <table class="list-table">
+            <tbody>
+              <tr><th>Power Rank</th><td>#{{ power.power_rank }}</td></tr>
+              <tr><th>OPR</th><td>{{ power.opr }}</td></tr>
+              <tr><th>DPR</th><td>{{ power.dpr }}</td></tr>
+              <tr><th>CCWM</th><td>{{ power.ccwm }}</td></tr>
+              <tr><th>Recent Form</th><td>{{ power.recent_form }}</td></tr>
+              <tr><th>Composite</th><td>{{ power.composite_score }}</td></tr>
+            </tbody>
+          </table>
+        {% else %}
+          <div class="muted-panel">No derived rankings yet.</div>
+        {% endif %}
+      </div>
+
+      <div class="summary-card">
+        {{ ui.section_header("Threats", "Closest Division Threats", "Teams most likely to matter to 7157B right now based on rank proximity, power, skills, and OPR.") }}
+        {% if threat_list %}
+          <table>
+            <thead>
+              <tr><th>Team</th><th>Official</th><th>Power</th><th>Skills</th><th>OPR</th><th>Threat</th></tr>
+            </thead>
+            <tbody>
+              {% for item in threat_list[:5] %}
+                <tr>
+                  <td>{{ item.team_number }}</td>
+                  <td>{{ item.official_rank if item.official_rank is not none else "N/A" }}</td>
+                  <td>{{ item.power_rank if item.power_rank is not none else "N/A" }}</td>
+                  <td>{{ item.skills_total if item.skills_total is not none else "N/A" }}</td>
+                  <td>{{ item.opr if item.opr is not none else "N/A" }}</td>
+                  <td>{{ item.threat_score }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <div class="muted-panel">No threat list yet.</div>
+        {% endif %}
+      </div>
+
+      <div class="summary-card">
+        {{ ui.section_header("Updates", "New Media And Web Signals", "Recent mention discovery from the background watcher so updates hit the front page instead of hiding in the Media tab.") }}
+        {% if not static_site %}
+          <div class="muted-panel" style="margin-bottom: 12px;">
+            Watcher: {{ media_state.status|title if media_state else "Unknown" }} ·
+            Last completed: {{ media_state.last_completed_at if media_state and media_state.last_completed_at else "Unknown" }} ·
+            Last new items: {{ media_state.last_new_items if media_state else 0 }}
+            {% if media_state and media_state.message %}
+              <br>{{ media_state.message }}
+            {% endif %}
+          </div>
+        {% endif %}
+        {% if recent_media %}
+          <table>
+            <thead>
+              <tr><th>Title</th><th>Platform</th><th>Confidence</th><th>Discovered</th></tr>
+            </thead>
+            <tbody>
+              {% for item in recent_media[:5] %}
+                <tr>
+                  <td>
+                    <a href="{{ item.url }}" target="_blank" rel="noopener noreferrer">{{ item.title }}</a>
+                    <div class="small">{{ item.source }}</div>
+                  </td>
+                  <td>{{ item.platform or "-" }}</td>
+                  <td><span class="badge {{ item.confidence }}">{{ item.confidence }}</span></td>
+                  <td>{{ item.discovered_at }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          <div class="small" style="margin-top: 10px;"><a href="{{ '/media' if not static_site else 'media/' }}">Open full media timeline</a></div>
+        {% else %}
+          <div class="muted-panel">No recent media items yet.</div>
+        {% endif %}
+      </div>
+
+      <div class="summary-card">
+        {{ ui.section_header("Alliance", "Alliance Impact", "Observed partner boost and opponent pressure based on completed-match margins.") }}
+        {% if alliance_impact.partner_rows or alliance_impact.opponent_rows %}
+          <div class="muted-panel">
+            {% if alliance_impact.partner_rows %}
+              Best partner trend: {{ alliance_impact.partner_rows[0].team_number }} at avg margin {{ alliance_impact.partner_rows[0].average_margin }} across {{ alliance_impact.partner_rows[0].matches }} matches.
+            {% endif %}
+            {% if alliance_impact.opponent_rows %}
+              <br>
+              Toughest opponent trend: {{ alliance_impact.opponent_rows[0].team_number }} at avg margin {{ alliance_impact.opponent_rows[0].average_margin }} across {{ alliance_impact.opponent_rows[0].matches }} matches.
+            {% endif %}
+          </div>
+        {% else %}
+          <div class="muted-panel">No alliance-impact data yet.</div>
+        {% endif %}
+      </div>
+
+      <div class="summary-card">
+        {{ ui.section_header("Swing", "Upcoming Swing Match", "The scheduled match most likely to move 7157B's trajectory next.") }}
+        {% if swing_matches %}
+          <div class="muted-panel">
+            {{ swing_matches[0].round_label or swing_matches[0].match_key }}
+            vs {{ ", ".join(swing_matches[0].opponent_teams) if swing_matches[0].opponent_teams else swing_matches[0].opponent or "TBD" }}
+            at {{ swing_matches[0].scheduled_time or "TBD" }}
+            <br>
+            Avg official rank {{ swing_matches[0].opponent_average_official_rank if swing_matches[0].opponent_average_official_rank is not none else "N/A" }} ·
+            avg power rank {{ swing_matches[0].opponent_average_power_rank if swing_matches[0].opponent_average_power_rank is not none else "N/A" }} ·
+            swing score {{ swing_matches[0].swing_score }}
+          </div>
+        {% else %}
+          <div class="muted-panel">No swing-match candidate yet.</div>
+        {% endif %}
+      </div>
+
+      {{ ui.sparkline_card("Official Rank Trend", "How the stored official rank has moved across recent snapshots.", rank_trend) }}
+      {{ ui.sparkline_card("Power Rank Trend", "How the derived power rank has moved across recent snapshots.", power_trend) }}
+    </section>
+
+    <section class="surface-stack">
+      <div class="summary-card">
+        {{ ui.section_header("Match Intel", "Next And Last Match", "Opponent context pulled from the latest division standings and power rows.") }}
+        {% if match_intelligence.next_match %}
+          <div class="muted-panel">
+            <strong>Next:</strong>
+            {{ match_intelligence.next_match.round_label or match_intelligence.next_match.match_key }}
+            vs {{ ", ".join(match_intelligence.next_match.opponent_teams) if match_intelligence.next_match.opponent_teams else match_intelligence.next_match.opponent or "TBD" }}
+            {% set next_source_class = "source-" ~ (match_intelligence.next_match.source or "unknown")|replace("_", "-") %}
+            <span class="badge {{ next_source_class }}" style="margin-left: 8px;">{{ (match_intelligence.next_match.source or "unknown")|replace("_", " ") }}</span>
+            <br>
+            <strong>Time:</strong> {{ match_intelligence.next_match.scheduled_time or "TBD" }}
+            <strong style="margin-left: 12px;">Location:</strong> {{ match_intelligence.next_match.field_name or "TBD" }}
+            {% if match_intelligence.next_match.opponent_average_official_rank is not none %}
+              <br>
+              Opponent avg official rank {{ match_intelligence.next_match.opponent_average_official_rank }} ·
+              avg power rank {{ match_intelligence.next_match.opponent_average_power_rank if match_intelligence.next_match.opponent_average_power_rank is not none else "N/A" }}
+            {% endif %}
+          </div>
+        {% else %}
+          <div class="muted-panel">No scheduled focal-team match is stored yet.</div>
+        {% endif %}
+        {% if match_intelligence.last_match %}
+          <div class="muted-panel" style="margin-top: 12px;">
+            <strong>Last:</strong>
+            {{ match_intelligence.last_match.round_label or match_intelligence.last_match.match_key }}
+            · {{ match_intelligence.last_match.score_for or "?" }}-{{ match_intelligence.last_match.score_against or "?" }}
+            vs {{ ", ".join(match_intelligence.last_match.opponent_teams) if match_intelligence.last_match.opponent_teams else match_intelligence.last_match.opponent or "TBD" }}
+          </div>
+        {% endif %}
+      </div>
+
+      <div class="summary-card">
+        {{ ui.section_header("Slate", "Upcoming Matchups", "The next known 7157B matches with partner and opponent ranking context.") }}
+        {% if matchup_summary %}
+          <div class="muted-panel" style="margin-bottom: 12px;">{{ matchup_summary.headline }}</div>
+        {% endif %}
+        {% if upcoming_matchups %}
+          <table>
+            <thead>
+              <tr><th>Match</th><th>Time</th><th>Location</th><th>Partners</th><th>Opponents</th><th>Opp Avg</th><th>Source</th><th>Call</th></tr>
+            </thead>
+            <tbody>
+              {% for item in upcoming_matchups %}
+                <tr>
+                  <td>{{ item.round_label or item.match_key }}</td>
+                  <td>{{ item.scheduled_time or "TBD" }}</td>
+                  <td>{{ item.field_name or "TBD" }}</td>
+                  <td>{{ ", ".join(item.partner_teams) if item.partner_teams else "TBD" }}</td>
+                  <td>{{ ", ".join(item.opponent_teams) if item.opponent_teams else item.opponent or "TBD" }}</td>
+                  <td>#{{ item.opponent_average_official_rank if item.opponent_average_official_rank is not none else "N/A" }} / P#{{ item.opponent_average_power_rank if item.opponent_average_power_rank is not none else "N/A" }}</td>
+                  {% set source_class = "source-" ~ (item.source or "unknown")|replace("_", "-") %}
+                  <td><span class="badge {{ source_class }}">{{ (item.source or "unknown")|replace("_", " ") }}</span></td>
+                  <td>{{ item.matchup_call }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <div class="muted-panel">No upcoming 7157B matchup slate is available from the local cache yet.</div>
+        {% endif %}
+      </div>
+
+      <div class="summary-card">
+        {{ ui.section_header("Deltas", "Since Previous Check", "What changed compared to the previous stored snapshot.") }}
+        <div class="grid">
+          <div class="metric"><span class="small">Official Direction</span><strong>{{ delta.rank_direction }}</strong></div>
+          <div class="metric"><span class="small">Official Change</span><strong>{{ delta.rank_change if delta.rank_change is not none else "N/A" }}</strong></div>
+          <div class="metric"><span class="small">Power Direction</span><strong>{{ power_delta.power_rank_direction if power_delta else "N/A" }}</strong></div>
+          <div class="metric"><span class="small">Power Change</span><strong>{{ power_delta.power_rank_change if power_delta and power_delta.power_rank_change is not none else "N/A" }}</strong></div>
+          <div class="metric"><span class="small">Record Changed</span><strong>{{ "Yes" if delta.record_changed else "No" }}</strong></div>
+        </div>
+      </div>
+
+      <div class="summary-card">
+        {{ ui.section_header("Matches", "Most Recent Completed", "Latest completed focal-team matches in the database.") }}
+        {% if recent_completed_matches %}
+          <table>
+            <thead>
+              <tr><th>Match</th><th>Opponent</th><th>Score</th><th>When</th></tr>
+            </thead>
+            <tbody>
+              {% for match in recent_completed_matches[:5] %}
+                <tr>
+                  <td>{{ match.round_label }}</td>
+                  <td>{{ match.opponent }}</td>
+                  <td>{{ match.score_for or "?" }}-{{ match.score_against or "?" }}</td>
+                  <td>{{ match.completed_time or "Unknown" }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <div class="muted-panel">No completed matches recorded yet.</div>
+        {% endif %}
+      </div>
+    </section>
+  </div>
+{% endblock %}

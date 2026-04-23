@@ -1,0 +1,65 @@
+{% extends "gui_base.html.j2" %}
+{% import "gui_primitives.html.j2" as ui %}
+{% set page_title = "Analysis" %}
+{% block content %}
+  {% set analysis_view = analysis if analysis is defined else {"headline": "", "cards": []} %}
+  {% call ui.page_intro("Analysis", "Autonomous Ranking Commentary", "A readable operator summary built from the current snapshots, derived metrics, media, and collector health.") %}
+    <a class="header-action" href="{{ '/' if not static_site else '../index.html' }}">Back To Dashboard</a>
+    <a class="header-action" href="{{ '/ai-rankings' if not static_site else '../ai-rankings/' }}">Open AI Rankings</a>
+    <a class="header-action" href="{{ '/rankings' if not static_site else '../rankings/' }}">Open Rankings</a>
+  {% endcall %}
+
+  <section class="summary-card">
+    {{ ui.section_header("Headline", "Current Assessment", "This is the concise readout of what the monitor thinks matters most right now.") }}
+    <div class="muted-panel">{{ analysis_view.headline or "No analysis available yet." }}</div>
+    {% if rankings_status %}
+      <div class="muted-panel small" style="margin-top: 12px;">
+        Coverage:
+        source {{ rankings_status.snapshot_source or "unknown" }} /
+        state {{ rankings_status.source_state or "unknown" }} /
+        standings tabs {{ ", ".join(rankings_status.result_tabs.standings) if rankings_status.result_tabs and rankings_status.result_tabs.standings else "none" }} /
+        skills tabs {{ ", ".join(rankings_status.result_tabs.skills) if rankings_status.result_tabs and rankings_status.result_tabs.skills else "none" }} /
+        match tabs {{ ", ".join(rankings_status.result_tabs.division_matches) if rankings_status.result_tabs and rankings_status.result_tabs.division_matches else "none" }}
+      </div>
+    {% endif %}
+  </section>
+
+  <div class="split" style="margin-top: 16px;">
+    {{ ui.sparkline_card("Official Rank Trend", "Recent official ranking movement for 7157B.", rank_trend) }}
+    {{ ui.sparkline_card("Power Rank Trend", "Recent derived ranking movement for 7157B.", power_trend) }}
+  </div>
+
+  <section class="summary-card" style="margin-top: 16px;">
+    {{ ui.section_header("Threats", "Threat List", "Teams the console currently considers most relevant to 7157B based on official proximity, power proximity, skills, and OPR.") }}
+    {% if threat_list %}
+      <table>
+        <thead>
+          <tr><th>Team</th><th>Official</th><th>Power</th><th>Skills</th><th>OPR</th><th>Threat</th></tr>
+        </thead>
+        <tbody>
+          {% for item in threat_list %}
+            <tr>
+              <td>{{ item.team_number }}</td>
+              <td>{{ item.official_rank if item.official_rank is not none else "N/A" }}</td>
+              <td>{{ item.power_rank if item.power_rank is not none else "N/A" }}</td>
+              <td>{{ item.skills_total if item.skills_total is not none else "N/A" }}</td>
+              <td>{{ item.opr if item.opr is not none else "N/A" }}</td>
+              <td>{{ item.threat_score }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="muted-panel">No threat list yet.</div>
+    {% endif %}
+  </section>
+
+  <div class="split" style="margin-top: 16px;">
+    {% for card in analysis_view.cards %}
+      <section class="summary-card">
+        {{ ui.section_header("Insight", card.title, "Autonomous analysis based on current stored data.") }}
+        <div class="muted-panel">{{ card.body }}</div>
+      </section>
+    {% endfor %}
+  </div>
+{% endblock %}

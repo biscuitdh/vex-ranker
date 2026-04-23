@@ -1,0 +1,244 @@
+{% extends "gui_base.html.j2" %}
+{% import "gui_primitives.html.j2" as ui %}
+{% set page_title = "AI Rankings" %}
+{% block content %}
+  {% set ai = ai_rankings if ai_rankings is defined and ai_rankings else none %}
+  {% set current_threat_sort = threat_sort if threat_sort is defined else "threat_score" %}
+  {% set current_threat_dir = threat_dir if threat_dir is defined else "desc" %}
+  {% call ui.page_intro("AI Rankings", "Hourly Ranking Intelligence", "A 7157B-centered scouting brief synthesized from official standings, power metrics, skills, threats, alliance effects, and source quality.") %}
+    <a class="header-action" href="{{ '/' if not static_site else '../index.html' }}">Back To Dashboard</a>
+    <a class="header-action" href="{{ '/rankings' if not static_site else '../rankings/' }}">Open Rankings</a>
+    {% if not static_site %}
+      <form method="post" action="/actions/refresh-ai-rankings">
+        <button type="submit" class="header-action">Refresh AI Rankings</button>
+      </form>
+    {% endif %}
+  {% endcall %}
+
+  {% if ai %}
+    {{ ui.metric_grid([
+      {"label": "Generated", "value": ai.generated_at or "Unknown"},
+      {"label": "Source Snapshot", "value": ai.source_snapshot_at or "Unknown"},
+      {"label": "Source", "value": ai.source_type or "Unknown"},
+      {"label": "Confidence", "value": ai.confidence.level|title if ai.confidence else "Unknown"},
+      {"label": "Official Rank", "value": ai.official_rank if ai.official_rank is not none else "N/A"},
+      {"label": "Power Rank", "value": ai.power_rank if ai.power_rank is not none else "N/A"},
+      {"label": "Skills", "value": ai.skills_total if ai.skills_total is not none else "N/A"},
+    ]) }}
+
+    <section class="summary-card" style="margin-top: 16px;">
+      {{ ui.section_header("Headline", "Current AI Ranking Read", "The hourly synthesized readout of what matters most for 7157B right now.") }}
+      <div class="muted-panel">{{ ai.headline }}</div>
+      <div class="muted-panel" style="margin-top: 12px;">{{ ai.why_it_matters }}</div>
+    </section>
+
+    <section class="summary-card" style="margin-top: 16px;">
+      {{ ui.section_header("Impact", "Recent Match Impact", "What the most recent completed result appears to have done to 7157B's standing picture.") }}
+      {% if match_intelligence.last_match or latest_snapshot %}
+        <div class="muted-panel">
+          {% if match_intelligence.last_match %}
+            Last completed result:
+            <strong>{{ match_intelligence.last_match.round_label or match_intelligence.last_match.match_key }}</strong>
+            ended
+            <strong>{{ match_intelligence.last_match.score_for or "?" }}-{{ match_intelligence.last_match.score_against or "?" }}</strong>
+            against
+            <strong>{{ ", ".join(match_intelligence.last_match.opponent_teams) if match_intelligence.last_match.opponent_teams else match_intelligence.last_match.opponent or "TBD" }}</strong>.
+            <br>
+          {% endif %}
+          {% if latest_snapshot %}
+            Official standing now sits at
+            <strong>#{{ latest_snapshot.rank if latest_snapshot.rank is not none else "N/A" }}</strong>
+            with record
+            <strong>{{ latest_snapshot.record_text or "Unknown" }}</strong>
+            and
+            <strong>{{ latest_snapshot.wp or "?" }}/{{ latest_snapshot.ap or "?" }}/{{ latest_snapshot.sp or "?" }}</strong>
+            in WP/AP/SP.
+            <br>
+          {% endif %}
+          {% if previous_snapshot and latest_snapshot and latest_snapshot.rank is not none and previous_snapshot.rank is not none %}
+            That is a move of
+            <strong>{{ previous_snapshot.rank - latest_snapshot.rank }}</strong>
+            places relative to the prior stored snapshot
+            (from #{{ previous_snapshot.rank }} to #{{ latest_snapshot.rank }}).
+          {% elif delta and delta.rank_direction %}
+            Latest official direction:
+            <strong>{{ delta.rank_direction }}</strong>.
+          {% endif %}
+        </div>
+      {% else %}
+        <div class="muted-panel">No recent completed result is available yet.</div>
+      {% endif %}
+    </section>
+
+    <div class="split" style="margin-top: 16px;">
+      {% for block in ai.summary_blocks %}
+        <section class="summary-card">
+          {{ ui.section_header("Insight", block.title, "Hourly rankings synthesis based on the latest stored data.") }}
+          <div class="muted-panel">{{ block.body }}</div>
+        </section>
+      {% endfor %}
+    </div>
+
+    <div class="split" style="margin-top: 16px;">
+      <section class="summary-card">
+        {{ ui.section_header("Priority", "What Matters Now", "Ranked factors the monitor thinks deserve attention first.") }}
+        <table>
+          <thead>
+            <tr><th>Priority</th><th>Factor</th></tr>
+          </thead>
+          <tbody>
+            {% for item in ai.priority_factors %}
+              <tr>
+                <td>{{ loop.index }}</td>
+                <td>{{ item }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </section>
+
+      <section class="summary-card">
+        {{ ui.section_header("Confidence", "Source And Confidence", "How trustworthy the current ranking picture is, based on source quality and coverage.") }}
+        <div class="muted-panel">
+          <strong>{{ ai.confidence.level|title if ai.confidence else "Unknown" }}</strong><br>
+          {{ ai.confidence.body if ai.confidence else "No confidence summary available yet." }}
+        </div>
+        {% if ai.trend %}
+          <div class="muted-panel" style="margin-top: 12px;">
+            Official trend: {{ ai.trend.official_direction or "flat" }}<br>
+            Power trend: {{ ai.trend.power_direction or "flat" }}
+          </div>
+        {% endif %}
+      </section>
+    </div>
+
+    <div class="split" style="margin-top: 16px;">
+      <section class="summary-card">
+        {{ ui.section_header("Threats", "Nearby Threats", "Closest teams around 7157B that currently matter most.") }}
+        {% if ai.threat_rows %}
+          <table>
+            <thead>
+              <tr>
+                <th><a class="sort-link" href="{{ '/ai-rankings' if not static_site else './' }}?threat_sort=team_number&threat_dir={{ next_threat_dir('team_number', 'asc') }}">Team{% if current_threat_sort == 'team_number' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+                <th>Official</th>
+                <th>Power</th>
+                <th>Skills</th>
+                <th>OPR</th>
+                <th><a class="sort-link" href="{{ '/ai-rankings' if not static_site else './' }}?threat_sort=threat_score&threat_dir={{ next_threat_dir('threat_score', 'desc') }}">Threat{% if current_threat_sort == 'threat_score' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+                <th><a class="sort-link" href="{{ '/ai-rankings' if not static_site else './' }}?threat_sort=official_pressure&threat_dir={{ next_threat_dir('official_pressure', 'desc') }}">Official{% if current_threat_sort == 'official_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+                <th><a class="sort-link" href="{{ '/ai-rankings' if not static_site else './' }}?threat_sort=power_pressure&threat_dir={{ next_threat_dir('power_pressure', 'desc') }}">Power{% if current_threat_sort == 'power_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+                <th><a class="sort-link" href="{{ '/ai-rankings' if not static_site else './' }}?threat_sort=skills_pressure&threat_dir={{ next_threat_dir('skills_pressure', 'desc') }}">Skills{% if current_threat_sort == 'skills_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+                <th><a class="sort-link" href="{{ '/ai-rankings' if not static_site else './' }}?threat_sort=scoring_pressure&threat_dir={{ next_threat_dir('scoring_pressure', 'desc') }}">Scoring{% if current_threat_sort == 'scoring_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for item in ai.threat_rows %}
+                <tr>
+                  <td>{{ item.team_number }}</td>
+                  <td>{{ item.official_rank if item.official_rank is not none else "N/A" }}</td>
+                  <td>{{ item.power_rank if item.power_rank is not none else "N/A" }}</td>
+                  <td>{{ item.skills_total if item.skills_total is not none else "N/A" }}</td>
+                  <td>{{ item.opr if item.opr is not none else "N/A" }}</td>
+                  <td><span class="badge badge-threat-{{ item.threat_level|lower }}">{{ item.threat_score }} · {{ item.threat_level }}</span></td>
+                  <td>{{ item.official_pressure }}</td>
+                  <td>{{ item.power_pressure }}</td>
+                  <td>{{ item.skills_pressure }}</td>
+                  <td>{{ item.scoring_pressure }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <div class="muted-panel">No threat rows are available yet.</div>
+        {% endif %}
+      </section>
+
+      <section class="summary-card">
+        {{ ui.section_header("Swing", "Likely Swing Matches", "Upcoming matches most likely to move 7157B's trajectory.") }}
+        {% if ai.swing_rows %}
+          <table>
+            <thead>
+              <tr><th>Match</th><th>Opponents</th><th>When</th><th>Swing</th><th>Call</th></tr>
+            </thead>
+            <tbody>
+              {% for item in ai.swing_rows %}
+                <tr>
+                  <td>{{ item.round_label or item.match_key }}</td>
+                  <td>{{ ", ".join(item.opponent_teams) if item.opponent_teams else item.opponent or "TBD" }}</td>
+                  <td>{{ item.scheduled_time or "TBD" }}</td>
+                  <td>{{ item.swing_score }} / up {{ item.upside_score }} / pressure {{ item.pressure_score }} / <span class="badge badge-risk-{{ item.risk_level|lower }}">{{ item.risk_level }}</span></td>
+                  <td>{{ item.ai_call }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <div class="muted-panel">No swing matches are available yet.</div>
+        {% endif %}
+      </section>
+    </div>
+
+    <div class="split" style="margin-top: 16px;">
+      <section class="summary-card">
+        {{ ui.section_header("Alliance", "Alliance Effects", "Best observed partner fit and toughest opponent pressure around 7157B.") }}
+        {% if ai.alliance and (ai.alliance.best_partner or ai.alliance.toughest_opponent) %}
+          <table>
+            <thead>
+              <tr><th>Signal</th><th>Team</th><th>Average Margin</th><th>Matches</th></tr>
+            </thead>
+            <tbody>
+              {% if ai.alliance.best_partner %}
+                <tr>
+                  <td>Best Partner</td>
+                  <td>{{ ai.alliance.best_partner.team_number }}</td>
+                  <td>{{ ai.alliance.best_partner.average_margin }}</td>
+                  <td>{{ ai.alliance.best_partner.matches }}</td>
+                </tr>
+              {% endif %}
+              {% if ai.alliance.toughest_opponent %}
+                <tr>
+                  <td>Toughest Opponent</td>
+                  <td>{{ ai.alliance.toughest_opponent.team_number }}</td>
+                  <td>{{ ai.alliance.toughest_opponent.average_margin }}</td>
+                  <td>{{ ai.alliance.toughest_opponent.matches }}</td>
+                </tr>
+              {% endif %}
+            </tbody>
+          </table>
+        {% else %}
+          <div class="muted-panel">No alliance-effect rows are available yet.</div>
+        {% endif %}
+      </section>
+
+      <section class="summary-card">
+        {{ ui.section_header("Movement", "Relevant Movers", "Top recent movers that could affect 7157B's local ranking pressure.") }}
+        {% if ai.top_movers %}
+          <table>
+            <thead>
+              <tr><th>Team</th><th>Previous</th><th>Current</th><th>Move</th></tr>
+            </thead>
+            <tbody>
+              {% for item in ai.top_movers %}
+                <tr>
+                  <td>{{ item.team_number }}</td>
+                  <td>{{ item.previous_power_rank }}</td>
+                  <td>{{ item.current_power_rank }}</td>
+                  <td>{{ item.movement }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <div class="muted-panel">No relevant movers are available yet.</div>
+        {% endif %}
+      </section>
+    </div>
+  {% else %}
+    <section class="summary-card">
+      {{ ui.section_header("Empty", "No AI Rankings Snapshot Yet", "The hourly AI rankings job has not stored a snapshot yet.") }}
+      <div class="muted-panel">
+        No AI rankings snapshot is available yet. Run a competition refresh or use the refresh button here to generate the first stored hourly brief.
+      </div>
+    </section>
+  {% endif %}
+{% endblock %}

@@ -1,0 +1,257 @@
+{% extends "gui_base.html.j2" %}
+{% import "gui_primitives.html.j2" as ui %}
+{% set page_title = "Rankings" %}
+{% block content %}
+  {% set status = rankings_status if rankings_status is defined else {
+    "rankings_count": 0,
+    "skills_count": 0,
+    "power_count": 0,
+    "snapshot_source": "",
+    "source_state": "",
+    "result_tabs": {"standings": [], "skills": [], "division_matches": []},
+    "latest_collector_run": none,
+    "has_rankings": false,
+    "empty_reason": "No rankings data has been collected yet.",
+    "latest_rankings_snapshot_at": none
+  } %}
+  {% set current_threat_sort = threat_sort if threat_sort is defined else "threat_score" %}
+  {% set current_threat_dir = threat_dir if threat_dir is defined else "desc" %}
+  {% call ui.page_intro("Rankings", "Official Standings And Power Rankings", "Official division standings, skills results, and our own computed ranking model live together here without pretending they are the same thing.") %}
+    <a class="header-action" href="{{ '/' if not static_site else '../index.html' }}">Back To Dashboard</a>
+    <a class="header-action" href="{{ settings.livestream_url }}" target="_blank" rel="noopener noreferrer">Open Livestream</a>
+    {% if not static_site %}
+      <form method="post" action="/actions/refresh-rankings">
+        <button type="submit" class="header-action">Refresh Rankings</button>
+      </form>
+      <form method="post" action="/actions/run-now">
+        <button type="submit" class="header-action">Refresh Full Data</button>
+      </form>
+    {% endif %}
+  {% endcall %}
+
+  {{ ui.metric_grid([
+    {"label": "7157B Official", "value": latest_snapshot.rank if latest_snapshot else "N/A"},
+    {"label": "7157B Power", "value": team_power.power_rank if team_power else "N/A"},
+    {"label": "7157B Skills", "value": team_skill.total_score if team_skill else "N/A"},
+    {"label": "Teams Ranked", "value": status.rankings_count},
+    {"label": "Movers Tracked", "value": biggest_movers|length},
+  ]) }}
+
+  <div class="surface-stack">
+        <section class="summary-card">
+          {{ ui.section_header("Status", "Rankings Ingestion Status", "This page now tells you whether the problem is missing data, partial data, or a collector failure instead of just staring back blankly.") }}
+          <div class="grid">
+            <div class="metric"><span class="small">Latest Standings</span><strong>{{ status.latest_rankings_snapshot_at or "None" }}</strong></div>
+            <div class="metric"><span class="small">Skills Rows</span><strong>{{ status.skills_count }}</strong></div>
+            <div class="metric"><span class="small">Power Rows</span><strong>{{ status.power_count }}</strong></div>
+            <div class="metric"><span class="small">Source</span><strong>{{ status.snapshot_source or "Unknown" }}</strong></div>
+            <div class="metric"><span class="small">State</span><strong>{{ status.source_state or "Unknown" }}</strong></div>
+            <div class="metric"><span class="small">Source Updated</span><strong>{{ status.source_updated_at or "Unknown" }}</strong></div>
+          </div>
+          <div class="muted-panel small">
+            Results-tab coverage:
+            standings {{ ", ".join(status.result_tabs.standings) if status.result_tabs and status.result_tabs.standings else "none" }} ·
+            skills {{ ", ".join(status.result_tabs.skills) if status.result_tabs and status.result_tabs.skills else "none" }} ·
+            matches {{ ", ".join(status.result_tabs.division_matches) if status.result_tabs and status.result_tabs.division_matches else "none" }}
+          </div>
+          {% if status.latest_collector_run %}
+            <div class="muted-panel small">
+              Last collector run:
+              {{ status.latest_collector_run.completed_at }} ·
+              {{ "OK" if status.latest_collector_run.success else "Fail" }} ·
+              {{ status.latest_collector_run.error_summary or "No warnings" }}
+            </div>
+          {% endif %}
+          {% if not status.has_rankings %}
+            <div class="muted-panel">
+              {{ status.empty_reason }}
+              {% if not settings.robotevents_api_key %}
+                API key missing; public fallback is the active path.
+              {% else %}
+                API key configured, but rankings have not been collected successfully yet.
+              {% endif %}
+            </div>
+          {% elif status.empty_reason %}
+            <div class="muted-panel">{{ status.empty_reason }}</div>
+          {% endif %}
+        </section>
+
+        <section class="summary-card">
+          {{ ui.section_header("Spotlight", "Team 7157B", "Primary focus stays on the team while the rest of the division provides context.") }}
+          {% if latest_snapshot %}
+            <table>
+              <thead>
+                <tr><th>Team</th><th>Official Rank</th><th>Power Rank</th><th>Record</th><th>Skills</th><th>OPR</th><th>DPR</th><th>CCWM</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>{{ latest_snapshot.team_number }}</td>
+                  <td>#{{ latest_snapshot.rank or "N/A" }}</td>
+                  <td>#{{ team_power.power_rank if team_power else "N/A" }}</td>
+                  <td>{{ latest_snapshot.record_text }}</td>
+                  <td>{{ team_skill.total_score if team_skill else "N/A" }}</td>
+                  <td>{{ team_power.opr if team_power else "N/A" }}</td>
+                  <td>{{ team_power.dpr if team_power else "N/A" }}</td>
+                  <td>{{ team_power.ccwm if team_power else "N/A" }}</td>
+                </tr>
+              </tbody>
+            </table>
+          {% else %}
+            <div class="muted-panel">No focal team standings yet.</div>
+          {% endif %}
+        </section>
+
+        <div class="split">
+          <section class="summary-card">
+            {{ ui.section_header("Official", "Division Standings", "RobotEvents rank remains canonical.") }}
+            <div class="scroll-table">
+              {% if division_rankings %}
+                <table>
+                  <thead>
+                    <tr><th>Rank</th><th>Team</th><th>Name</th><th>Record</th><th>WP</th><th>AP</th><th>SP</th><th>Avg</th></tr>
+                  </thead>
+                  <tbody>
+                    {% for item in division_rankings %}
+                      <tr>
+                        <td>{{ item.rank }}</td>
+                        <td>{{ item.team_number }}</td>
+                        <td>{{ item.team_name or item.organization or "-" }}</td>
+                        <td>{{ item.record_text }}</td>
+                        <td>{{ item.wp }}</td>
+                        <td>{{ item.ap }}</td>
+                        <td>{{ item.sp }}</td>
+                        <td>{{ item.average_score or "N/A" }}</td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              {% else %}
+                <div class="muted-panel">{{ status.empty_reason or "No official standings yet." }}</div>
+              {% endif %}
+            </div>
+          </section>
+
+          <section class="summary-card">
+            {{ ui.section_header("Skills", "Skills Standings", "Driver plus Programming high scores.") }}
+            <div class="scroll-table">
+              {% if skills_rankings %}
+                <table>
+                  <thead>
+                    <tr><th>Team</th><th>Driver</th><th>Programming</th><th>Total</th></tr>
+                  </thead>
+                  <tbody>
+                    {% for item in skills_rankings[:25] %}
+                      <tr>
+                        <td>{{ item.team_number }}</td>
+                        <td>{{ item.driver_score }}</td>
+                        <td>{{ item.programming_score }}</td>
+                        <td>{{ item.total_score }}</td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              {% else %}
+                <div class="muted-panel">No skills data yet. Official standings can still populate before skills do.</div>
+              {% endif %}
+            </div>
+          </section>
+        </div>
+
+        <div class="split">
+          <section class="summary-card">
+            {{ ui.section_header("Scout", "Threat List", "Teams currently most relevant to 7157B based on nearby official rank, nearby power rank, skills, and scoring profile.") }}
+            {% if threat_list %}
+              <table>
+                <thead>
+                  <tr>
+                    <th><a class="sort-link" href="{{ '/rankings' if not static_site else './' }}?threat_sort=team_number&threat_dir={{ next_threat_dir('team_number', 'asc') }}">Team{% if current_threat_sort == 'team_number' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+                    <th>Official</th>
+                    <th>Power</th>
+                    <th>Record</th>
+                    <th>Skills</th>
+                    <th>OPR</th>
+                    <th><a class="sort-link" href="{{ '/rankings' if not static_site else './' }}?threat_sort=threat_score&threat_dir={{ next_threat_dir('threat_score', 'desc') }}">Threat{% if current_threat_sort == 'threat_score' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+                    <th><a class="sort-link" href="{{ '/rankings' if not static_site else './' }}?threat_sort=official_pressure&threat_dir={{ next_threat_dir('official_pressure', 'desc') }}">Official{% if current_threat_sort == 'official_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+                    <th><a class="sort-link" href="{{ '/rankings' if not static_site else './' }}?threat_sort=power_pressure&threat_dir={{ next_threat_dir('power_pressure', 'desc') }}">Power{% if current_threat_sort == 'power_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+                    <th><a class="sort-link" href="{{ '/rankings' if not static_site else './' }}?threat_sort=skills_pressure&threat_dir={{ next_threat_dir('skills_pressure', 'desc') }}">Skills{% if current_threat_sort == 'skills_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+                    <th><a class="sort-link" href="{{ '/rankings' if not static_site else './' }}?threat_sort=scoring_pressure&threat_dir={{ next_threat_dir('scoring_pressure', 'desc') }}">Scoring{% if current_threat_sort == 'scoring_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for item in threat_list %}
+                    <tr>
+                      <td>{{ item.team_number }}</td>
+                      <td>{{ item.official_rank if item.official_rank is not none else "N/A" }}</td>
+                      <td>{{ item.power_rank if item.power_rank is not none else "N/A" }}</td>
+                      <td>{{ item.record_text or "Unknown" }}</td>
+                      <td>{{ item.skills_total if item.skills_total is not none else "N/A" }}</td>
+                      <td>{{ item.opr if item.opr is not none else "N/A" }}</td>
+                      <td><span class="badge badge-threat-{{ item.threat_level|lower }}">{{ item.threat_score }} · {{ item.threat_level }}</span></td>
+                      <td>{{ item.official_pressure }}</td>
+                      <td>{{ item.power_pressure }}</td>
+                      <td>{{ item.skills_pressure }}</td>
+                      <td>{{ item.scoring_pressure }}</td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            {% else %}
+              <div class="muted-panel">No threat list yet.</div>
+            {% endif %}
+          </section>
+
+          <section class="summary-card">
+            {{ ui.section_header("Derived", "Power Rankings", "Custom rank blends official performance, skills, and derived match metrics.") }}
+            <div class="scroll-table">
+              {% if power_rankings %}
+                <table>
+                  <thead>
+                    <tr><th>Power</th><th>Team</th><th>Official</th><th>OPR</th><th>DPR</th><th>CCWM</th><th>Form</th><th>Skills</th><th>Score</th></tr>
+                  </thead>
+                  <tbody>
+                    {% for item in power_rankings %}
+                      <tr>
+                        <td>{{ item.power_rank }}</td>
+                        <td>{{ item.team_number }}</td>
+                        <td>{{ item.official_rank }}</td>
+                        <td>{{ item.opr }}</td>
+                        <td>{{ item.dpr }}</td>
+                        <td>{{ item.ccwm }}</td>
+                        <td>{{ item.recent_form }}</td>
+                        <td>{{ item.skills_total }}</td>
+                        <td>{{ item.composite_score }}</td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              {% else %}
+                <div class="muted-panel">No power rankings yet. They only compute once there is enough completed match data.</div>
+              {% endif %}
+            </div>
+          </section>
+
+          <section class="summary-card">
+            {{ ui.section_header("Movement", "Biggest Movers", "Largest power-rank swings between the latest two snapshots.") }}
+            {% if biggest_movers %}
+              <table>
+                <thead>
+                  <tr><th>Team</th><th>Previous</th><th>Current</th><th>Move</th></tr>
+                </thead>
+                <tbody>
+                  {% for item in biggest_movers %}
+                    <tr>
+                      <td>{{ item.team_number }}</td>
+                      <td>{{ item.previous_power_rank }}</td>
+                      <td>{{ item.current_power_rank }}</td>
+                      <td>{{ item.movement }}</td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            {% else %}
+              <div class="muted-panel">Not enough history yet to calculate movers.</div>
+            {% endif %}
+          </section>
+        </div>
+  </div>
+{% endblock %}

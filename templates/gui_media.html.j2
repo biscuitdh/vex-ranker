@@ -1,0 +1,63 @@
+{% extends "gui_base.html.j2" %}
+{% import "gui_primitives.html.j2" as ui %}
+{% set page_title = "Media" %}
+{% block content %}
+  {% call ui.page_intro("Media", "Public Mentions", "Targeted web, official, school/community, and optional social sources with platform tagging and dedupe.") %}
+    <a class="header-action" href="{{ '/settings' if not static_site else '../settings/' }}">Source Settings</a>
+    {% if not static_site %}
+      <form method="post" action="/actions/refresh-media">
+        <button type="submit" class="header-action">Refresh Media</button>
+      </form>
+    {% endif %}
+  {% endcall %}
+
+  {% if not static_site %}
+    <section class="summary-card">
+      {{ ui.section_header("Watcher", "Background Media Status", "Low-frequency background collection for web, official, YouTube, Reddit, and enabled social sources.") }}
+      <div class="grid">
+        <div class="metric"><span class="small">Status</span><strong class="metric-value-compact">{{ media_state.status|title if media_state else "Unknown" }}</strong></div>
+        <div class="metric"><span class="small">Last Started</span><strong class="metric-value metric-value-data">{{ media_state.last_started_at if media_state and media_state.last_started_at else "Unknown" }}</strong></div>
+        <div class="metric"><span class="small">Last Completed</span><strong class="metric-value metric-value-data">{{ media_state.last_completed_at if media_state and media_state.last_completed_at else "Unknown" }}</strong></div>
+        <div class="metric"><span class="small">Last New Items</span><strong>{{ media_state.last_new_items if media_state else 0 }}</strong></div>
+        <div class="metric"><span class="small">Partial Failures</span><strong>{{ media_state.last_partial_count if media_state else 0 }}</strong></div>
+      </div>
+      <div class="muted-panel" style="margin-top: 12px;">
+        {{ media_state.message if media_state and media_state.message else "No media watcher status available yet." }}
+        {% if media_state and media_state.last_error %}
+          <br><span class="small">Last error: {{ media_state.last_error }}</span>
+        {% endif %}
+      </div>
+    </section>
+  {% endif %}
+
+  <section class="summary-card">
+    {{ ui.section_header("Timeline", "Recent Mentions", "Newest first, deduped by canonical URL.") }}
+    {% if recent_media %}
+      <div class="scroll-table">
+        <table>
+          <thead>
+            <tr><th>Title</th><th>Platform</th><th>Type</th><th>Confidence</th><th>Published</th><th>Discovered</th></tr>
+          </thead>
+          <tbody>
+            {% for item in recent_media %}
+              <tr>
+                <td>
+                  <a href="{{ item.url }}">{{ item.title }}</a>
+                  <div class="small">{{ item.snippet }}</div>
+                  <div class="small">Source: {{ item.source }}{% if item.author_handle %} · {{ item.author_handle }}{% endif %}</div>
+                </td>
+                <td>{{ item.platform or "-" }}</td>
+                <td><span class="badge social">{{ item.source_type or "web" }}</span></td>
+                <td><span class="badge {{ item.confidence }}">{{ item.confidence }}</span></td>
+                <td>{{ item.published_at or "Unknown" }}</td>
+                <td>{{ item.discovered_at }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="muted-panel">No public mentions collected yet.</div>
+    {% endif %}
+  </section>
+{% endblock %}

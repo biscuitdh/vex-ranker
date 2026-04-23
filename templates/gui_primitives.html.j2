@@ -1,0 +1,62 @@
+{% macro page_intro(kicker, title, subtitle) -%}
+  <section class="panel page-intro">
+    <div class="page-intro-copy">
+      <span class="section-label">{{ kicker }}</span>
+      <h2 class="page-intro-title">{{ title }}</h2>
+      <p class="page-intro-subtitle">{{ subtitle }}</p>
+    </div>
+    {% if caller is defined %}
+      <div class="btn-row">
+        {{ caller() }}
+      </div>
+    {% endif %}
+  </section>
+{%- endmacro %}
+
+{% macro metric_grid(metrics, extra_class="") -%}
+  <section class="page-metric-grid{% if extra_class %} {{ extra_class }}{% endif %}">
+    {% for metric in metrics %}
+      {% set metric_text = metric.value|string %}
+      {% set is_long = metric_text|length > 16 %}
+      {% set is_dataish = ":" in metric_text or "T" in metric_text or "_" in metric_text or "+" in metric_text %}
+      <div class="metric">
+        <span class="small">{{ metric.label }}</span>
+        <strong class="metric-value{% if is_long %} metric-value-compact{% endif %}{% if is_dataish %} metric-value-data{% endif %}">{{ metric.value }}</strong>
+      </div>
+    {% endfor %}
+  </section>
+{%- endmacro %}
+
+{% macro section_header(kicker, title, subtitle) -%}
+  <div class="surface-header">
+    <span class="section-label">{{ kicker }}</span>
+    <h3 class="surface-title">{{ title }}</h3>
+    <p class="surface-subtitle">{{ subtitle }}</p>
+  </div>
+{%- endmacro %}
+
+{% macro sparkline_card(title, subtitle, trend, invert=false) -%}
+  <div class="summary-card">
+    {{ section_header("Trend", title, subtitle) }}
+    {% if trend and trend.sparkline and trend.sparkline.points %}
+      <div class="muted-panel">
+        <svg viewBox="0 0 100 28" preserveAspectRatio="none" style="width: 100%; height: 56px;">
+          <polyline
+            fill="none"
+            stroke="var(--accent)"
+            stroke-width="2"
+            points="{{ trend.sparkline.points }}"
+          />
+        </svg>
+        <div class="small" style="display:flex;justify-content:space-between;gap:12px;">
+          <span>Direction: {{ trend.direction }}</span>
+          <span>Window: {{ trend.sparkline.count }}</span>
+          <span>Latest: {{ trend.sparkline.latest }}</span>
+          <span>Range: {{ trend.sparkline.min }} to {{ trend.sparkline.max }}</span>
+        </div>
+      </div>
+    {% else %}
+      <div class="muted-panel">Not enough history yet to plot a trend.</div>
+    {% endif %}
+  </div>
+{%- endmacro %}

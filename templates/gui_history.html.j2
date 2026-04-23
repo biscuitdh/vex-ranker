@@ -1,0 +1,57 @@
+{% extends "gui_base.html.j2" %}
+{% import "gui_primitives.html.j2" as ui %}
+{% set page_title = "History" %}
+{% block content %}
+  {% call ui.page_intro("History", "Rank Trends And Collector Runs", "Stored focal-team snapshots plus the recent collector execution trail.") %}
+    <a class="header-action" href="{{ '/rankings' if not static_site else '../rankings/' }}">Open Rankings</a>
+  {% endcall %}
+
+  <div class="split">
+    <section class="summary-card">
+      {{ ui.section_header("Snapshots", "Team Rank History", "Recent stored competition snapshots for the focal team.") }}
+      {% if snapshot_history %}
+        <table>
+          <thead>
+            <tr><th>Fetched</th><th>Official Rank</th><th>Record</th><th>Source</th></tr>
+          </thead>
+          <tbody>
+            {% for item in snapshot_history %}
+              <tr>
+                <td>{{ item.fetched_at }}</td>
+                <td>{{ item.rank or "N/A" }}</td>
+                <td>{{ item.record_text or "Unknown" }}</td>
+                <td>{{ item.source }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="muted-panel">No snapshot history yet.</div>
+      {% endif %}
+    </section>
+
+    <section class="summary-card">
+      {{ ui.section_header("Collectors", "Execution Trail", "Recent collector runs, counts, and errors.") }}
+      {% if collector_runs %}
+        <table>
+          <thead>
+            <tr><th>Collector</th><th>Status</th><th>Items</th><th>Error</th><th>Completed</th></tr>
+          </thead>
+          <tbody>
+            {% for item in collector_runs %}
+              <tr>
+                <td>{{ item.collector_name }}</td>
+                <td>{{ "OK" if item.success else "Fail" }}</td>
+                <td>{{ item.item_count }}</td>
+                <td class="small">{{ item.error_summary or "-" }}</td>
+                <td>{{ item.completed_at }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="muted-panel">No collector run history yet.</div>
+      {% endif %}
+    </section>
+  </div>
+{% endblock %}

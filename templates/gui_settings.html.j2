@@ -1,0 +1,97 @@
+{% extends "gui_base.html.j2" %}
+{% import "gui_primitives.html.j2" as ui %}
+{% set page_title = "Settings" %}
+{% block content %}
+  {% call ui.page_intro("Settings", "Effective Runtime Configuration", "What the process is actually using right now, including real source toggles and power-rank weights.") %}
+    <a class="header-action" href="{{ '/' if not static_site else '../index.html' }}">Back To Dashboard</a>
+  {% endcall %}
+
+  <div class="split">
+    <section class="summary-card">
+      {{ ui.section_header("Core", "Configured Values", "Primary environment-backed settings.") }}
+      <table>
+        <tbody>
+          <tr><th>Event SKU</th><td class="mono">{{ settings.event_sku }}</td></tr>
+          <tr><th>Event Name</th><td>{{ settings.event_name_alias }}</td></tr>
+          <tr><th>Livestream</th><td><a href="{{ settings.livestream_url }}" target="_blank" rel="noopener noreferrer">{{ settings.livestream_url }}</a></td></tr>
+          <tr><th>Division</th><td>{{ settings.division_name }}</td></tr>
+          <tr><th>Team</th><td>{{ settings.team_number }}</td></tr>
+          <tr><th>Alias</th><td>{{ settings.team_name_alias }}</td></tr>
+          <tr><th>School</th><td>{{ settings.school_alias }}</td></tr>
+          <tr><th>Poll Interval</th><td>{{ settings.poll_interval_minutes }} minutes</td></tr>
+          <tr><th>Media Interval</th><td>{{ settings.media_interval_minutes }} minutes</td></tr>
+          <tr><th>Background Media Watcher</th><td>{{ "Enabled" if settings.enable_background_media_watcher else "Disabled" }}</td></tr>
+          <tr><th>Daily Summary Hour</th><td>{{ settings.daily_summary_hour }}:00</td></tr>
+          <tr><th>Timezone</th><td>{{ settings.timezone }}</td></tr>
+          <tr><th>Discord Enabled</th><td>{{ "Yes" if settings.discord_webhook_url else "No" }}</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="summary-card">
+      {{ ui.section_header("Sources", "Collector Toggles And Paths", "Broader source coverage, including optional social adapters.") }}
+      <table>
+        <tbody>
+          <tr><th>Optional Social</th><td>{{ "Enabled" if settings.enable_optional_social else "Disabled" }}</td></tr>
+          <tr><th>Reddit</th><td>{{ "Enabled" if settings.enable_reddit else "Disabled" }}</td></tr>
+          <tr><th>Instagram</th><td>{{ "Enabled" if settings.enable_instagram else "Disabled" }}</td></tr>
+          <tr><th>TikTok</th><td>{{ "Enabled" if settings.enable_tiktok else "Disabled" }}</td></tr>
+          <tr><th>Facebook</th><td>{{ "Enabled" if settings.enable_facebook else "Disabled" }}</td></tr>
+          <tr><th>YouTube</th><td>{{ "Enabled" if settings.enable_youtube else "Disabled" }}</td></tr>
+          <tr><th>Official Sources</th><td>{{ "Enabled" if settings.enable_official_sources else "Disabled" }}</td></tr>
+          <tr><th>RSS</th><td>{{ "Enabled" if settings.enable_rss_sources else "Disabled" }}</td></tr>
+          <tr><th>Browser Fallback</th><td>{{ "Enabled" if settings.enable_browser_fallback else "Disabled" }}</td></tr>
+          <tr><th>VEX Via Local</th><td>{{ "Enabled" if settings.enable_vexvia_local else "Disabled" }}</td></tr>
+          <tr><th>Browser Timeout</th><td>{{ settings.browser_timeout_seconds }}s</td></tr>
+          <tr><th>Notify Threshold</th><td>{{ settings.media_confidence_notify_min }}</td></tr>
+          {% if not static_site %}
+            <tr><th>VEX Via Event DB</th><td class="mono">{{ settings.vexvia_event_db_path or "Auto-discover" }}</td></tr>
+            <tr><th>VEX Via Container</th><td class="mono">{{ settings.vexvia_container_path or "Auto-discover" }}</td></tr>
+            <tr><th>Database</th><td class="mono">{{ settings.db_path }}</td></tr>
+            <tr><th>Reports</th><td class="mono">{{ settings.reports_dir }}</td></tr>
+            <tr><th>Logs</th><td class="mono">{{ settings.log_dir }}</td></tr>
+          {% else %}
+            <tr><th>Static Site Base URL</th><td>{{ settings.static_site_base_url or "Project-relative" }}</td></tr>
+            <tr><th>Publish Branch</th><td>{{ settings.publish_branch }}</td></tr>
+            <tr><th>Git Push Enabled</th><td>{{ "Yes" if settings.git_push_enabled else "No" }}</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </section>
+  </div>
+
+  <div class="split">
+    <section class="summary-card">
+      {{ ui.section_header("Power Rank", "Weight Model", "Computed rankings stay transparent instead of pretending math is magic.") }}
+      <table>
+        <tbody>
+          <tr><th>Official</th><td>{{ settings.power_rank_weight_official }}</td></tr>
+          <tr><th>OPR</th><td>{{ settings.power_rank_weight_opr }}</td></tr>
+          <tr><th>DPR</th><td>{{ settings.power_rank_weight_dpr }}</td></tr>
+          <tr><th>CCWM</th><td>{{ settings.power_rank_weight_ccwm }}</td></tr>
+          <tr><th>Skills</th><td>{{ settings.power_rank_weight_skills }}</td></tr>
+          <tr><th>Recent Form</th><td>{{ settings.power_rank_weight_form }}</td></tr>
+          <tr><th>Recent Match Count</th><td>{{ settings.power_rank_recent_match_count }}</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="summary-card">
+      {{ ui.section_header("Queries", "Search Terms And Seed Sources", "Configured terms and source seeds for broader collection.") }}
+      <div class="muted-panel small">
+        Search terms:
+        <br>
+        {% for term in settings.search_terms %}
+          <span class="chip">{{ term }}</span>
+        {% endfor %}
+      </div>
+      <div class="muted-panel small">
+        Official seeds:
+        <br>
+        {% for item in settings.official_source_urls %}
+          <span class="chip">{{ item }}</span>
+        {% endfor %}
+      </div>
+    </section>
+  </div>
+{% endblock %}
