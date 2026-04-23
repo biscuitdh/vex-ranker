@@ -8,9 +8,11 @@
   {% set analysis_view = analysis if analysis is defined else {"headline": "", "cards": []} %}
   {% set health = dashboard_health if dashboard_health is defined else {"status": "unknown", "freshness": {}} %}
   {% if static_site %}
-    {% call ui.page_intro("Public Snapshot", "7157B Match Day View", "A simple public snapshot focused on what matters most right now: the AI read and the next known matches.") %}
-      <a class="header-action" href="ai-rankings/">Open AI Rankings</a>
-      <a class="header-action" href="matches/">Open Matches</a>
+    {% call ui.page_intro("Public Snapshot", "7157B Match Day", "A simple public view with the current read and the next known matches.") %}
+      <div class="public-nav">
+        <a class="header-action" href="ai-rankings/">AI Rankings</a>
+        <a class="header-action" href="matches/">Match Slate</a>
+      </div>
       {% if settings.livestream_url %}
         <a class="header-action" href="{{ settings.livestream_url }}" target="_blank" rel="noopener noreferrer">Open Livestream</a>
       {% endif %}
@@ -22,7 +24,7 @@
       {"label": "Record", "value": snapshot.record_text if snapshot else "Unknown"},
       {"label": "Next Match", "value": match_intelligence.next_match.round_label if match_intelligence and match_intelligence.next_match else "Unknown"},
       {"label": "Next Field", "value": match_intelligence.next_match.field_name if match_intelligence and match_intelligence.next_match and match_intelligence.next_match.field_name else "TBD"},
-      {"label": "Next Time", "value": match_intelligence.next_match.scheduled_time if match_intelligence and match_intelligence.next_match and match_intelligence.next_match.scheduled_time else "TBD"},
+      {"label": "Next Time", "value": display_time(match_intelligence.next_match.scheduled_time) if match_intelligence and match_intelligence.next_match and match_intelligence.next_match.scheduled_time else "TBD"},
     ]) }}
 
     <div class="split">
@@ -72,7 +74,7 @@
             <table>
               <tbody>
                 <tr><th>Match</th><td>{{ match_intelligence.next_match.round_label or match_intelligence.next_match.match_key }}</td></tr>
-                <tr><th>Time</th><td>{{ match_intelligence.next_match.scheduled_time or "TBD" }}</td></tr>
+                <tr><th>Time</th><td>{{ display_time(match_intelligence.next_match.scheduled_time) if match_intelligence.next_match.scheduled_time else "TBD" }}</td></tr>
                 <tr><th>Location</th><td>{{ match_intelligence.next_match.field_name or "TBD" }}</td></tr>
                 <tr><th>Partners</th><td>{{ ", ".join(match_intelligence.next_match.partner_teams) if match_intelligence.next_match.partner_teams else "TBD" }}</td></tr>
                 <tr><th>Opponents</th><td>{{ ", ".join(match_intelligence.next_match.opponent_teams) if match_intelligence.next_match.opponent_teams else match_intelligence.next_match.opponent or "TBD" }}</td></tr>
@@ -97,7 +99,7 @@
                 {% for item in upcoming_matchups[:5] %}
                   <tr>
                     <td>{{ item.round_label or item.match_key }}</td>
-                    <td>{{ item.scheduled_time or "TBD" }}</td>
+                    <td>{{ display_time(item.scheduled_time) if item.scheduled_time else "TBD" }}</td>
                     <td>{{ item.field_name or "TBD" }}</td>
                     <td>{{ ", ".join(item.opponent_teams) if item.opponent_teams else item.opponent or "TBD" }}</td>
                   </tr>

@@ -12,10 +12,11 @@
   {% if static_site %}
   {{ ui.metric_grid([
     {"label": "Next Match", "value": match_intelligence.next_match.round_label if match_intelligence and match_intelligence.next_match else "Unknown"},
-    {"label": "Next Time", "value": match_intelligence.next_match.scheduled_time if match_intelligence and match_intelligence.next_match and match_intelligence.next_match.scheduled_time else "TBD"},
+    {"label": "Next Time", "value": display_time(match_intelligence.next_match.scheduled_time) if match_intelligence and match_intelligence.next_match and match_intelligence.next_match.scheduled_time else "TBD"},
     {"label": "Next Field", "value": match_intelligence.next_match.field_name if match_intelligence and match_intelligence.next_match and match_intelligence.next_match.field_name else "TBD"},
     {"label": "Last Result", "value": ((match_intelligence.last_match.score_for|string) ~ "-" ~ (match_intelligence.last_match.score_against|string)) if match_intelligence and match_intelligence.last_match and match_intelligence.last_match.score_for is not none and match_intelligence.last_match.score_against is not none else "Unknown"},
   ]) }}
+  <div class="page-note small">Updated {{ display_time(export_metadata.generated_at) }} · Next slate from {{ display_source_name((match_intelligence.next_match.source if match_intelligence and match_intelligence.next_match else latest_snapshot.source if latest_snapshot else 'unknown')) }}</div>
   {% endif %}
 
   <div class="split">
@@ -26,10 +27,12 @@
           <tbody>
             <tr><th>Match</th><td>{{ match_intelligence.next_match.round_label or match_intelligence.next_match.match_key }}</td></tr>
             <tr><th>Opponents</th><td>{{ ", ".join(match_intelligence.next_match.opponent_teams) if match_intelligence.next_match.opponent_teams else match_intelligence.next_match.opponent or "TBD" }}</td></tr>
-            <tr><th>Scheduled</th><td>{{ match_intelligence.next_match.scheduled_time or "TBD" }}</td></tr>
+            <tr><th>Scheduled</th><td>{{ display_time(match_intelligence.next_match.scheduled_time) if static_site and match_intelligence.next_match.scheduled_time else match_intelligence.next_match.scheduled_time or "TBD" }}</td></tr>
             <tr><th>Location</th><td>{{ match_intelligence.next_match.field_name or "TBD" }}</td></tr>
-            {% set next_source_class = "source-" ~ (match_intelligence.next_match.source or "unknown")|replace("_", "-") %}
-            <tr><th>Source</th><td><span class="badge {{ next_source_class }}">{{ (match_intelligence.next_match.source or "unknown")|replace("_", " ") }}</span></td></tr>
+            {% if not static_site %}
+              {% set next_source_class = "source-" ~ (match_intelligence.next_match.source or "unknown")|replace("_", "-") %}
+              <tr><th>Source</th><td><span class="badge {{ next_source_class }}">{{ (match_intelligence.next_match.source or "unknown")|replace("_", " ") }}</span></td></tr>
+            {% endif %}
             <tr><th>Avg Official Rank</th><td>{{ match_intelligence.next_match.opponent_average_official_rank if match_intelligence.next_match.opponent_average_official_rank is not none else "N/A" }}</td></tr>
             <tr><th>Avg Power Rank</th><td>{{ match_intelligence.next_match.opponent_average_power_rank if match_intelligence.next_match.opponent_average_power_rank is not none else "N/A" }}</td></tr>
           </tbody>
@@ -91,15 +94,14 @@
           {% for item in upcoming_matchups[:(6 if static_site else upcoming_matchups|length)] %}
             <tr>
               <td>{{ item.round_label or item.match_key }}</td>
-              <td>{{ item.scheduled_time or "TBD" }}</td>
+              <td>{{ display_time(item.scheduled_time) if static_site and item.scheduled_time else item.scheduled_time or "TBD" }}</td>
               <td>{{ item.field_name or "TBD" }}</td>
               <td>{{ item.alliance or "N/A" }}</td>
               <td>{{ ", ".join(item.partner_teams) if item.partner_teams else "TBD" }}</td>
               <td>{{ ", ".join(item.opponent_teams) if item.opponent_teams else item.opponent or "TBD" }}</td>
               <td>#{{ item.partner_average_official_rank if item.partner_average_official_rank is not none else "N/A" }} / P#{{ item.partner_average_power_rank if item.partner_average_power_rank is not none else "N/A" }}</td>
               <td>#{{ item.opponent_average_official_rank if item.opponent_average_official_rank is not none else "N/A" }} / P#{{ item.opponent_average_power_rank if item.opponent_average_power_rank is not none else "N/A" }}</td>
-              {% set source_class = "source-" ~ (item.source or "unknown")|replace("_", "-") %}
-              <td><span class="badge {{ source_class }}">{{ (item.source or "unknown")|replace("_", " ") }}</span></td>
+              <td>{% if static_site %}{{ display_source_name(item.source) }}{% else %}{% set source_class = "source-" ~ (item.source or "unknown")|replace("_", "-") %}<span class="badge {{ source_class }}">{{ (item.source or "unknown")|replace("_", " ") }}</span>{% endif %}</td>
               <td>{{ item.matchup_call }}</td>
             </tr>
           {% endfor %}
@@ -123,7 +125,7 @@
               <tr>
                 <td>{{ item.round_label or item.match_key }}</td>
                 <td>{{ ", ".join(item.opponent_teams) if item.opponent_teams else item.opponent or "TBD" }}</td>
-                <td>{{ item.scheduled_time or "TBD" }}</td>
+                <td>{{ display_time(item.scheduled_time) if static_site and item.scheduled_time else item.scheduled_time or "TBD" }}</td>
                 <td>{{ item.opponent_average_official_rank if item.opponent_average_official_rank is not none else "N/A" }}</td>
                 <td>{{ item.opponent_average_power_rank if item.opponent_average_power_rank is not none else "N/A" }}</td>
                 <td>{{ item.swing_score }}</td>

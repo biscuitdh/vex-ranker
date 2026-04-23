@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Iterator
 import httpx
 
+from storage.manual_notes_seed import COACH_SHEET_NOTES
 from utils.analysis import build_ai_rankings, build_analysis
 from utils.service_control import inspect_managed_services
 
@@ -258,10 +259,27 @@ def init_db(connection: sqlite3.Connection) -> None:
             dpr REAL,
             ccwm REAL,
             recent_form REAL,
+            manual_scout_score REAL,
+            manual_scout_weight REAL,
+            manual_note_summary TEXT,
             composite_score REAL,
             power_rank INTEGER,
             raw_json TEXT NOT NULL,
             UNIQUE(snapshot_at, event_sku, division_name, team_number)
+        );
+
+        CREATE TABLE IF NOT EXISTS manual_team_notes (
+            team_number TEXT PRIMARY KEY,
+            raw_note TEXT NOT NULL,
+            circled_rank INTEGER,
+            blue_record_text TEXT,
+            blue_wp INTEGER,
+            skills_total_manual REAL,
+            region TEXT,
+            comment_tags_json TEXT NOT NULL,
+            source_label TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            confidence TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS ai_rankings_snapshots (
@@ -318,11 +336,85 @@ def init_db(connection: sqlite3.Connection) -> None:
     _add_column_if_missing(connection, "matches", "field_name", "TEXT")
     _add_column_if_missing(connection, "division_matches", "field_id", "INTEGER")
     _add_column_if_missing(connection, "division_matches", "field_name", "TEXT")
+    _add_column_if_missing(connection, "derived_metrics_snapshots", "manual_scout_score", "REAL")
+    _add_column_if_missing(connection, "derived_metrics_snapshots", "manual_scout_weight", "REAL")
+    _add_column_if_missing(connection, "derived_metrics_snapshots", "manual_note_summary", "TEXT")
+    _seed_manual_team_notes(connection)
 
 
 def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     """Convert a row to a plain dictionary."""
     return dict(row) if row is not None else None
+
+
+def _seed_manual_team_notes(connection: sqlite3.Connection) -> None:
+    """Persist the one-off coach sheet transcription for this project."""
+    for item in COACH_SHEET_NOTES:
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO manual_team_notes (
+                team_number, raw_note, circled_rank, blue_record_text, blue_wp,
+                skills_total_manual, region, comment_tags_json, source_label,
+                captured_at, confidence
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item["team_number"],
+                item["raw_note"],
+                item.get("circled_rank"),
+                item.get("blue_record_text", ""),
+                item.get("blue_wp"),
+                item.get("skills_total_manual"),
+                item.get("region", ""),
+                to_json(item.get("comment_tags", [])),
+                item.get("source_label", "coach_sheet_2026_04_23"),
+                item.get("captured_at") or utc_now(),
+                item.get("confidence", "medium"),
+            ),
+        )
+
+
+def _hydrate_manual_note(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    """Convert a raw manual note row into a plain dictionary."""
+    note = row_to_dict(row)
+    if not note:
+        return None
+    try:
+        note["comment_tags"] = json.loads(str(note.get("comment_tags_json") or "[]"))
+    except json.JSONDecodeError:
+        note["comment_tags"] = []
+    return note
+
+
+def get_manual_team_notes(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Return all persisted coach notes for the photographed sheet."""
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM manual_team_notes
+        ORDER BY COALESCE(circled_rank, 9999) ASC, team_number ASC
+        """
+    ).fetchall()
+    notes: list[dict[str, Any]] = []
+    for row in rows:
+        note = _hydrate_manual_note(row)
+        if note:
+            notes.append(note)
+    return notes
+
+
+def get_manual_team_note(connection: sqlite3.Connection, team_number: str) -> dict[str, Any] | None:
+    """Return the manual note for one team when available."""
+    row = connection.execute(
+        """
+        SELECT *
+        FROM manual_team_notes
+        WHERE team_number = ?
+        LIMIT 1
+        """,
+        (team_number,),
+    ).fetchone()
+    return _hydrate_manual_note(row)
 
 
 def record_competition_snapshot(connection: sqlite3.Connection, snapshot: dict[str, Any]) -> int:
@@ -818,8 +910,14 @@ def _parse_match_datetime(value: str | None) -> datetime | None:
     """Parse an ISO-ish scheduled or completed timestamp."""
     if not value:
         return None
+    raw_value = str(value).strip()
+    if raw_value.isdigit():
+        try:
+            return datetime.fromtimestamp(float(raw_value), tz=timezone.utc)
+        except (TypeError, ValueError, OSError):
+            return None
     try:
-        return datetime.fromisoformat(str(value))
+        return datetime.fromisoformat(raw_value)
     except ValueError:
         return None
 
@@ -955,11 +1053,13 @@ def _fallback_match_from_division(
     blue_teams = json.loads(row_dict.get("blue_teams_json") or "[]")
     if team_number in red_teams:
         alliance = "red"
+        partners = [team for team in red_teams if team != team_number]
         opponents = blue_teams
         score_for = row_dict.get("red_score")
         score_against = row_dict.get("blue_score")
     elif team_number in blue_teams:
         alliance = "blue"
+        partners = [team for team in blue_teams if team != team_number]
         opponents = red_teams
         score_for = row_dict.get("blue_score")
         score_against = row_dict.get("red_score")
@@ -979,6 +1079,7 @@ def _fallback_match_from_division(
         "field_id": row_dict.get("field_id"),
         "field_name": row_dict.get("field_name"),
         "alliance": alliance,
+        "partner_teams": partners,
         "opponent": ", ".join(opponents) if opponents else "TBD",
         "score_for": score_for,
         "score_against": score_against,
@@ -1707,6 +1808,8 @@ def get_threat_list(connection: sqlite3.Connection, team_number: str, limit: int
                 "scoring_pressure": round(scoring_pressure, 2),
                 "threat_level": threat_level,
                 "threat_score": round(threat_score, 2),
+                "manual_scout_score": power_row.get("manual_scout_score"),
+                "manual_note_summary": power_row.get("manual_note_summary") or "",
             }
         )
     threats.sort(
@@ -1875,6 +1978,36 @@ def _component_payload(
     }
 
 
+def _next_match_identity(match_row: dict[str, Any] | None) -> str:
+    """Return a stable identity for the current next-match pointer."""
+    if not match_row:
+        return ""
+    match_key = str(match_row.get("match_key") or "").strip()
+    if match_key:
+        return f"match_key:{match_key}"
+    round_label = str(match_row.get("round_label") or "").strip()
+    scheduled_time = str(match_row.get("scheduled_time") or "").strip()
+    if round_label and scheduled_time:
+        return f"round_time:{round_label}|{scheduled_time}"
+    opponent = str(match_row.get("opponent") or ",".join(match_row.get("opponent_teams") or [])).strip()
+    if scheduled_time and opponent:
+        return f"time_opp:{scheduled_time}|{opponent}"
+    return ""
+
+
+def _previous_next_match_from_healthcheck(latest_healthcheck: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return the prior stored next-match payload from the last healthcheck when available."""
+    if not latest_healthcheck or latest_healthcheck.get("raw_json") in (None, ""):
+        return None
+    try:
+        payload = json.loads(str(latest_healthcheck["raw_json"]))
+    except json.JSONDecodeError:
+        return None
+    freshness = payload.get("freshness") or {}
+    previous_match = freshness.get("current_next_match")
+    return previous_match if isinstance(previous_match, dict) else None
+
+
 def _data_pipeline_health(
     connection: sqlite3.Connection,
     settings: Any,
@@ -1966,6 +2099,110 @@ def _data_pipeline_health(
         },
     )
     return component, freshness, reasons, warnings
+
+
+def _match_progress_health(
+    connection: sqlite3.Connection,
+    settings: Any,
+    latest_snapshot: dict[str, Any] | None,
+    latest_healthcheck: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return match-progress health based on record changes versus next-match advancement."""
+    checked_at = utc_now()
+    previous_snapshot = get_previous_snapshot(connection)
+    match_intelligence = get_match_intelligence(connection, settings.team_number)
+    last_match = match_intelligence.get("last_match") or {}
+    current_next_match = match_intelligence.get("next_match") or {}
+    previous_next_match = _previous_next_match_from_healthcheck(latest_healthcheck) or {}
+    current_identity = _next_match_identity(current_next_match)
+    previous_identity = _next_match_identity(previous_next_match)
+    current_record = str((latest_snapshot or {}).get("record_text") or "")
+    previous_record = str((previous_snapshot or {}).get("record_text") or "")
+    record_changed = bool(current_record and previous_record and current_record != previous_record)
+    latest_snapshot_at = str((latest_snapshot or {}).get("fetched_at") or "")
+    snapshot_age = age_minutes(latest_snapshot_at)
+    grace_minutes = int(getattr(settings, "match_progress_grace_minutes", 10))
+
+    details = {
+        "previous_record_text": previous_record,
+        "current_record_text": current_record,
+        "previous_next_match": previous_next_match,
+        "current_next_match": current_next_match,
+        "previous_next_match_identity": previous_identity,
+        "current_next_match_identity": current_identity,
+        "last_completed_match": last_match,
+        "record_changed": record_changed,
+        "grace_minutes": grace_minutes,
+        "snapshot_age_minutes": snapshot_age,
+    }
+
+    if not record_changed:
+        return (
+            _component_payload(
+                name="match_progress",
+                status="healthy",
+                summary="Match progress is consistent with the current record and next-match state.",
+                checked_at=checked_at,
+                details=details,
+            ),
+            details,
+        )
+    if not current_identity:
+        return (
+            _component_payload(
+                name="match_progress",
+                status="healthy",
+                summary="Team record changed and no legitimate next match is currently scheduled.",
+                checked_at=checked_at,
+                details=details,
+            ),
+            details,
+        )
+    if previous_identity and current_identity != previous_identity:
+        return (
+            _component_payload(
+                name="match_progress",
+                status="healthy",
+                summary="Team record changed and the next-match pointer advanced as expected.",
+                checked_at=checked_at,
+                details=details,
+            ),
+            details,
+        )
+
+    if previous_identity and current_identity == previous_identity:
+        if snapshot_age is None or snapshot_age <= grace_minutes:
+            return (
+                _component_payload(
+                    name="match_progress",
+                    status="degraded",
+                    summary="Team record changed but the next-match slate has not advanced yet; still inside the grace window.",
+                    checked_at=checked_at,
+                    details=details,
+                ),
+                details,
+            )
+        return (
+            _component_payload(
+                name="match_progress",
+                status="failed",
+                summary="Team record changed but the next-match slate still points at the same match, which suggests the slate is stuck.",
+                checked_at=checked_at,
+                details=details,
+            ),
+            details,
+        )
+
+    return (
+        _component_payload(
+            name="match_progress",
+            status="degraded",
+            summary="Team record changed, but there is no prior next-match identity to confirm that the slate advanced.",
+            checked_at=checked_at,
+            details=details,
+        ),
+        details,
+    )
 
 
 def _gui_surface_health(settings: Any) -> dict[str, Any]:
@@ -2141,12 +2378,23 @@ def evaluate_dashboard_health(connection: sqlite3.Connection, settings: Any) -> 
         ai_rankings,
         ai_generated_at,
     )
+    match_progress, match_progress_details = _match_progress_health(
+        connection,
+        settings,
+        latest_snapshot,
+        latest_healthcheck,
+    )
+    freshness["previous_record_text"] = match_progress_details.get("previous_record_text", "")
+    freshness["current_record_text"] = match_progress_details.get("current_record_text", "")
+    freshness["previous_next_match"] = match_progress_details.get("previous_next_match") or {}
+    freshness["current_next_match"] = match_progress_details.get("current_next_match") or {}
     gui_surface = _gui_surface_health(settings)
     published_surface = _published_surface_health(connection, settings)
     notification_path = _notification_path_health(settings)
     service_supervision = _service_supervision_health(settings)
     components = {
         "data_pipeline": data_pipeline,
+        "match_progress": match_progress,
         "gui_surface": gui_surface,
         "published_surface": published_surface,
         "notification_path": notification_path,
@@ -2174,6 +2422,7 @@ def evaluate_dashboard_health(connection: sqlite3.Connection, settings: Any) -> 
         "thresholds": {
             "dashboard_stale_minutes": settings.dashboard_stale_minutes,
             "ai_rankings_stale_minutes": settings.ai_rankings_stale_minutes,
+            "match_progress_grace_minutes": settings.match_progress_grace_minutes,
             "restart_cooldown_minutes": settings.restart_cooldown_minutes,
             "max_auto_repair_attempts": settings.max_auto_repair_attempts,
         },
@@ -2287,6 +2536,87 @@ def _normalize_metric(values: dict[str, float], *, invert: bool = False) -> dict
     return normalized
 
 
+def _parse_blue_record(value: str | None) -> tuple[int, int] | None:
+    """Parse handwritten blue W-L shorthand like 4-2."""
+    if not value or "-" not in str(value):
+        return None
+    left, right = str(value).split("-", 1)
+    if not left.strip().isdigit() or not right.strip().isdigit():
+        return None
+    return int(left.strip()), int(right.strip())
+
+
+def _manual_note_summary(note: dict[str, Any]) -> str:
+    """Build a short human-readable coach-note summary."""
+    parts: list[str] = []
+    if note.get("circled_rank") is not None:
+        parts.append(f"circled {note['circled_rank']}")
+    if note.get("blue_record_text"):
+        record_bits = [str(note["blue_record_text"])]
+        if note.get("blue_wp") is not None:
+            record_bits.append(f"{note['blue_wp']}WP")
+        parts.append("blue " + " / ".join(record_bits))
+    if note.get("skills_total_manual") is not None:
+        parts.append(f"manual skills {note['skills_total_manual']}")
+    tags = note.get("comment_tags") or []
+    if tags:
+        parts.append("tags " + ", ".join(tags))
+    elif note.get("raw_note"):
+        parts.append(str(note["raw_note"]))
+    return "; ".join(parts)
+
+
+def _comment_tag_bonus(tags: list[str]) -> float:
+    """Return a small bounded bonus from recognized achievement tags."""
+    mapping = {
+        "number_one_in_world": 5.0,
+        "triple_crown_japan_nats": 4.5,
+        "won_states": 4.0,
+        "state_finalist": 2.5,
+        "hk_champs": 3.5,
+        "innovate_pr_nats": 3.0,
+        "design_states": 2.5,
+        "excellence_states": 2.5,
+        "signature_event_note": 2.0,
+        "rollover_bid": 1.5,
+    }
+    return min(sum(mapping.get(tag, 0.0) for tag in tags), 8.0)
+
+
+def _build_manual_scout_inputs(connection: sqlite3.Connection, teams: list[str]) -> tuple[dict[str, float], dict[str, str]]:
+    """Build raw manual note inputs for later normalization and reporting."""
+    notes = {item["team_number"]: item for item in get_manual_team_notes(connection)}
+    raw_scores: dict[str, float] = {team: 0.0 for team in teams}
+    summaries: dict[str, str] = {team: "" for team in teams}
+    for team in teams:
+        note = notes.get(team)
+        if not note:
+            continue
+        circled_rank = note.get("circled_rank")
+        circled_component = 0.0 if circled_rank is None else max(0.0, 100.0 - float(circled_rank))
+        record_component = 0.0
+        parsed_record = _parse_blue_record(note.get("blue_record_text"))
+        if parsed_record:
+            wins, losses = parsed_record
+            total = wins + losses
+            if total:
+                record_component = (wins / total) * 30.0
+        wp_component = min(float(note.get("blue_wp") or 0.0) * 2.0, 20.0)
+        skills_component = min(float(note.get("skills_total_manual") or 0.0) / 10.0, 25.0)
+        tags = note.get("comment_tags") or []
+        tag_component = _comment_tag_bonus(tags)
+        raw_scores[team] = round(
+            (circled_component * 0.55)
+            + (record_component * 0.20)
+            + (wp_component * 0.10)
+            + (skills_component * 0.10)
+            + (tag_component * 0.05),
+            6,
+        )
+        summaries[team] = _manual_note_summary(note)
+    return raw_scores, summaries
+
+
 def compute_and_store_derived_metrics(
     connection: sqlite3.Connection,
     *,
@@ -2379,11 +2709,18 @@ def compute_and_store_derived_metrics(
     normalized_ccwm = _normalize_metric(ccwm_map)
     normalized_skills = _normalize_metric(skills_map)
     normalized_form = _normalize_metric(form_score_map)
+    manual_raw_scores, manual_summaries = _build_manual_scout_inputs(connection, teams)
+    normalized_manual = (
+        _normalize_metric(manual_raw_scores)
+        if any(value > 0.0 for value in manual_raw_scores.values())
+        else {team: 0.0 for team in teams}
+    )
+    manual_weight = min(0.15, max(0.0, float(weights.get("manual", 0.12))))
 
     metrics: list[dict[str, Any]] = []
     for row in ranking_rows:
         team = str(row["team_number"])
-        composite = (
+        base_composite = (
             weights["official"] * normalized_official.get(team, 0.0)
             + weights["opr"] * normalized_opr.get(team, 0.0)
             + weights["dpr"] * normalized_dpr.get(team, 0.0)
@@ -2391,6 +2728,7 @@ def compute_and_store_derived_metrics(
             + weights["skills"] * normalized_skills.get(team, 0.0)
             + weights["form"] * normalized_form.get(team, 0.0)
         )
+        composite = ((1.0 - manual_weight) * base_composite) + (manual_weight * normalized_manual.get(team, 0.0))
         metrics.append(
             {
                 "snapshot_at": snapshot_at,
@@ -2403,6 +2741,9 @@ def compute_and_store_derived_metrics(
                 "dpr": round(dpr_map.get(team, 0.0), 3),
                 "ccwm": round(ccwm_map.get(team, 0.0), 3),
                 "recent_form": round(form_score_map.get(team, 0.0), 3),
+                "manual_scout_score": round(normalized_manual.get(team, 0.0), 6),
+                "manual_scout_weight": round(manual_weight, 3),
+                "manual_note_summary": manual_summaries.get(team, ""),
                 "composite_score": round(composite, 6),
             }
         )
@@ -2414,9 +2755,10 @@ def compute_and_store_derived_metrics(
             """
             INSERT OR REPLACE INTO derived_metrics_snapshots (
                 snapshot_at, event_sku, division_name, team_number, official_rank,
-                skills_total, opr, dpr, ccwm, recent_form, composite_score,
+                skills_total, opr, dpr, ccwm, recent_form, manual_scout_score,
+                manual_scout_weight, manual_note_summary, composite_score,
                 power_rank, raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 item["snapshot_at"],
@@ -2429,6 +2771,9 @@ def compute_and_store_derived_metrics(
                 item["dpr"],
                 item["ccwm"],
                 item["recent_form"],
+                item["manual_scout_score"],
+                item["manual_scout_weight"],
+                item["manual_note_summary"],
                 item["composite_score"],
                 item["power_rank"],
                 to_json(item),
@@ -2476,6 +2821,7 @@ def build_dashboard_view(
     power_rankings = get_latest_power_rankings(connection, limit=200)
     team_skill = get_latest_team_skill(connection, team_number)
     team_power = get_latest_team_power(connection, team_number)
+    team_manual_note = get_manual_team_note(connection, team_number)
     previous_power = get_previous_team_power(connection, team_number)
     movers = get_biggest_movers(connection, limit=10)
     threat_list = get_threat_list(connection, team_number, limit=10)
@@ -2505,6 +2851,7 @@ def build_dashboard_view(
         "power_rankings": power_rankings,
         "team_skill": team_skill,
         "team_power": team_power,
+        "team_manual_note": team_manual_note,
         "power_delta": compute_power_rank_delta(team_power, previous_power),
         "biggest_movers": movers,
         "threat_list": threat_list,

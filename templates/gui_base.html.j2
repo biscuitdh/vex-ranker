@@ -39,6 +39,7 @@
       a { color: var(--accent-2); text-decoration: none; }
       a:hover { color: var(--ink); }
       .page { max-width: 1480px; margin: 0 auto; padding: 22px; }
+      body.public-shell .page { max-width: 980px; }
       .top-shell { display: grid; gap: 18px; }
       .app-header, .content-shell {
         background: var(--panel);
@@ -240,6 +241,14 @@
       .mono { font-family: "SFMono-Regular", "Menlo", monospace; }
       .scroll-table { overflow-x: auto; }
       .page-note { margin-top: 10px; color: var(--muted); }
+      .public-nav {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .public-nav a {
+        flex: 1 1 160px;
+      }
       @media (max-width: 1100px) {
         .page-metric-grid, .split, .triple { grid-template-columns: 1fr; }
       }
@@ -248,9 +257,84 @@
           grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
         }
       }
+      @media (max-width: 768px) {
+        body.public-shell {
+          background:
+            radial-gradient(circle at top left, rgba(57, 160, 255, 0.18), transparent 32%),
+            linear-gradient(180deg, #07101a 0%, var(--bg) 100%);
+          background-size: auto, auto;
+        }
+        .page {
+          padding: 12px;
+        }
+        .top-shell {
+          gap: 12px;
+        }
+        .app-header {
+          padding: 16px;
+        }
+        .content-shell,
+        .panel,
+        .summary-card,
+        .metric {
+          padding: 14px;
+        }
+        .brand h1 {
+          font-size: 1.65rem;
+        }
+        .page-intro-title {
+          font-size: 1.3rem;
+        }
+        .page-intro-subtitle,
+        .surface-subtitle,
+        .brand p,
+        .small {
+          font-size: 0.98rem;
+          line-height: 1.5;
+        }
+        .page-metric-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 10px;
+        }
+        .metric-value {
+          font-size: clamp(1.2rem, 7vw, 2rem);
+        }
+        .metric-value-compact,
+        .metric-value-data {
+          font-size: clamp(0.95rem, 4.2vw, 1.2rem);
+        }
+        .btn-row,
+        .public-nav {
+          width: 100%;
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 10px;
+        }
+        .header-action,
+        button.header-action,
+        .tab-bar a {
+          width: 100%;
+          min-width: 0;
+          padding: 12px;
+        }
+        .tab-bar {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 8px;
+        }
+        table {
+          display: block;
+          overflow-x: auto;
+          white-space: nowrap;
+          -webkit-overflow-scrolling: touch;
+        }
+        th, td {
+          padding: 9px 7px;
+        }
+      }
     </style>
   </head>
-  <body>
+  <body class="{% if static_site %}public-shell{% else %}operator-shell{% endif %}">
     <div class="page">
       <div class="top-shell">
         <header class="app-header">
@@ -261,41 +345,36 @@
               <p>{{ settings.team_name_alias }} · {{ settings.school_alias }}</p>
               {% if static_site and export_metadata %}
                 <div class="page-note small">
-                  Published {{ export_metadata.generated_at }} · Source {{ export_metadata.source_type or "unknown" }} · Snapshot {{ export_metadata.source_snapshot_at or "unknown" }}
+                  Updated {{ display_time(export_metadata.generated_at) }}
                 </div>
               {% endif %}
             </div>
-            <div class="header-tools">
-              <div class="chip">{{ status_banner.headline }}</div>
-              <div class="chip">{{ status_banner.subtext }}</div>
-              {% if dashboard_health %}
-                <div class="badge health-{{ dashboard_health.status or 'unknown' }}">Automation {{ (dashboard_health.status or "unknown")|title }}</div>
-              {% endif %}
-              {% if media_state and not static_site %}
-                <div class="chip">Media Watcher {{ media_state.status|title if media_state.status else "Idle" }}</div>
-              {% endif %}
-              {% if static_site %}
-                <span class="chip">Static Snapshot</span>
-              {% else %}
+            {% if not static_site %}
+              <div class="header-tools">
+                <div class="chip">{{ status_banner.headline }}</div>
+                <div class="chip">{{ status_banner.subtext }}</div>
+                {% if dashboard_health %}
+                  <div class="badge health-{{ dashboard_health.status or 'unknown' }}">Automation {{ (dashboard_health.status or "unknown")|title }}</div>
+                {% endif %}
+                {% if media_state %}
+                  <div class="chip">Media Watcher {{ media_state.status|title if media_state.status else "Idle" }}</div>
+                {% endif %}
                 <form method="post" action="/actions/run-now">
                   <button type="submit" class="header-action">Run Refresh</button>
                 </form>
-              {% endif %}
-            </div>
+              </div>
+            {% endif %}
           </div>
-          <div class="selected-meta small">
-            <span class="chip">Event {{ settings.event_sku }}</span>
-            <span class="chip">Division {{ settings.division_name }}</span>
-            <span class="chip">Competition {{ settings.poll_interval_minutes }}m</span>
-            {% if not static_site %}
+          {% if not static_site %}
+            <div class="selected-meta small">
+              <span class="chip">Event {{ settings.event_sku }}</span>
+              <span class="chip">Division {{ settings.division_name }}</span>
+              <span class="chip">Competition {{ settings.poll_interval_minutes }}m</span>
               <span class="chip">Media {{ settings.media_interval_minutes }}m</span>
               <span class="chip">Refresh Manual + Launch</span>
-            {% else %}
-              <span class="chip">Static Export Hourly</span>
-              <span class="chip">Public GitHub Pages</span>
-            {% endif %}
-            <span class="chip">Optional Social {{ "On" if settings.enable_optional_social else "Off" }}</span>
-          </div>
+              <span class="chip">Optional Social {{ "On" if settings.enable_optional_social else "Off" }}</span>
+            </div>
+          {% endif %}
           <nav class="tab-bar">
             {% for key, href, label in nav_items %}
               <a href="{{ href }}" class="{% if active_tab == key %}active{% endif %}">{{ label }}</a>

@@ -16,15 +16,25 @@
   {% endcall %}
 
   {% if ai %}
-    {{ ui.metric_grid([
-      {"label": "Generated", "value": ai.generated_at or "Unknown"},
-      {"label": "Source Snapshot", "value": ai.source_snapshot_at or "Unknown"},
-      {"label": "Source", "value": ai.source_type or "Unknown"},
-      {"label": "Confidence", "value": ai.confidence.level|title if ai.confidence else "Unknown"},
-      {"label": "Official Rank", "value": ai.official_rank if ai.official_rank is not none else "N/A"},
-      {"label": "Power Rank", "value": ai.power_rank if ai.power_rank is not none else "N/A"},
-      {"label": "Skills", "value": ai.skills_total if ai.skills_total is not none else "N/A"},
-    ]) }}
+    {% if static_site %}
+      {{ ui.metric_grid([
+        {"label": "Official Rank", "value": ai.official_rank if ai.official_rank is not none else "N/A"},
+        {"label": "Power Rank", "value": ai.power_rank if ai.power_rank is not none else "N/A"},
+        {"label": "Record", "value": latest_snapshot.record_text if latest_snapshot else "Unknown"},
+        {"label": "Confidence", "value": ai.confidence.level|title if ai.confidence else "Unknown"},
+      ]) }}
+      <div class="page-note small">Updated {{ display_time(ai.generated_at) }} · Source {{ display_source_name(ai.source_type) }}</div>
+    {% else %}
+      {{ ui.metric_grid([
+        {"label": "Generated", "value": ai.generated_at or "Unknown"},
+        {"label": "Source Snapshot", "value": ai.source_snapshot_at or "Unknown"},
+        {"label": "Source", "value": ai.source_type or "Unknown"},
+        {"label": "Confidence", "value": ai.confidence.level|title if ai.confidence else "Unknown"},
+        {"label": "Official Rank", "value": ai.official_rank if ai.official_rank is not none else "N/A"},
+        {"label": "Power Rank", "value": ai.power_rank if ai.power_rank is not none else "N/A"},
+        {"label": "Skills", "value": ai.skills_total if ai.skills_total is not none else "N/A"},
+      ]) }}
+    {% endif %}
 
     <section class="summary-card" style="margin-top: 16px;">
       {{ ui.section_header("Headline", "Current AI Ranking Read", "The hourly synthesized readout of what matters most for 7157B right now.") }}
@@ -129,6 +139,7 @@
                 <th><a class="sort-link" href="{{ '/ai-rankings' if not static_site else './' }}?threat_sort=power_pressure&threat_dir={{ next_threat_dir('power_pressure', 'desc') }}">Power{% if current_threat_sort == 'power_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
                 <th><a class="sort-link" href="{{ '/ai-rankings' if not static_site else './' }}?threat_sort=skills_pressure&threat_dir={{ next_threat_dir('skills_pressure', 'desc') }}">Skills{% if current_threat_sort == 'skills_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
                 <th><a class="sort-link" href="{{ '/ai-rankings' if not static_site else './' }}?threat_sort=scoring_pressure&threat_dir={{ next_threat_dir('scoring_pressure', 'desc') }}">Scoring{% if current_threat_sort == 'scoring_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+                <th>Coach</th>
               </tr>
             </thead>
             <tbody>
@@ -144,6 +155,7 @@
                   <td>{{ item.power_pressure }}</td>
                   <td>{{ item.skills_pressure }}</td>
                   <td>{{ item.scoring_pressure }}</td>
+                  <td>{{ item.manual_scout_score if item.manual_scout_score is not none else "N/A" }}{% if item.manual_note_summary %} · {{ item.manual_note_summary }}{% endif %}</td>
                 </tr>
               {% endfor %}
             </tbody>
@@ -165,7 +177,7 @@
                 <tr>
                   <td>{{ item.round_label or item.match_key }}</td>
                   <td>{{ ", ".join(item.opponent_teams) if item.opponent_teams else item.opponent or "TBD" }}</td>
-                  <td>{{ item.scheduled_time or "TBD" }}</td>
+                  <td>{{ display_time(item.scheduled_time) if static_site and item.scheduled_time else item.scheduled_time or "TBD" }}</td>
                   <td>{{ item.swing_score }} / up {{ item.upside_score }} / pressure {{ item.pressure_score }} / <span class="badge badge-risk-{{ item.risk_level|lower }}">{{ item.risk_level }}</span></td>
                   <td>{{ item.ai_call }}</td>
                 </tr>

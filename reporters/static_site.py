@@ -30,12 +30,41 @@ PAGE_SPECS: dict[str, tuple[str, str]] = {
 def _template_environment(base_dir: Path) -> Environment:
     """Create a Jinja environment for the static exporter."""
     template_dir = base_dir / "templates"
-    return Environment(
+    environment = Environment(
         loader=FileSystemLoader(template_dir),
         autoescape=select_autoescape(enabled_extensions=("html",)),
         trim_blocks=True,
         lstrip_blocks=True,
     )
+    environment.globals["display_time"] = _display_time
+    environment.globals["display_source_name"] = _display_source_name
+    return environment
+
+
+def _display_time(value: Any) -> str:
+    """Render a parent-friendly Eastern time timestamp."""
+    if value in (None, "", "Unknown"):
+        return "TBD"
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return str(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    local_time = parsed.astimezone()
+    return local_time.strftime("%a, %b %-d · %-I:%M %p")
+
+
+def _display_source_name(value: Any) -> str:
+    """Render a nicer public source label."""
+    if not value:
+        return "Unknown"
+    label = str(value).replace("_", " ").strip()
+    if label.lower() == "vex via local":
+        return "VEX Via"
+    if label.lower() == "observed vex via":
+        return "VEX Via Screen"
+    return label.title()
 
 
 def _relative_href(page_key: str, current_key: str) -> str:
@@ -74,7 +103,7 @@ def _status_banner(view: dict[str, Any]) -> dict[str, str]:
     ai_text = f" · AI {ai_rankings.get('confidence', {}).get('level', '').title()}" if ai_rankings else ""
     return {
         "headline": f"Team {snapshot.get('team_number')} - Rank #{snapshot.get('rank') or 'N/A'}{power_text}{ai_text}",
-        "subtext": f"Last source snapshot: {snapshot.get('fetched_at', 'unknown')}",
+        "subtext": f"Last update { _display_time(snapshot.get('fetched_at')) }",
     }
 
 

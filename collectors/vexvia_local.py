@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import logging
 from pathlib import Path
@@ -274,6 +275,16 @@ class VexViaLocalCollector:
         except sqlite3.OperationalError:
             field_rows = []
         field_map = {int(row["id"]): str(row["name"]) for row in field_rows if row["id"] is not None}
+        team_rows = connection.execute("SELECT id, number FROM teams").fetchall()
+        team_map = {int(row["id"]): str(row["number"]) for row in team_rows if row["id"] is not None and row["number"] is not None}
+        def _resolve_team_number(value: Any) -> str:
+            if value in (None, ""):
+                return ""
+            try:
+                return team_map.get(int(value), str(value))
+            except (TypeError, ValueError):
+                return str(value)
+
         rows = connection.execute(
             """
             SELECT *
@@ -285,26 +296,41 @@ class VexViaLocalCollector:
         ).fetchall()
         matches: list[dict[str, Any]] = []
         for row in rows:
-            red_teams = [str(team) for team in (row["red_team1"], row["red_team2"]) if team]
-            blue_teams = [str(team) for team in (row["blue_team1"], row["blue_team2"]) if team]
-            session = str(row["session"] or "").strip()
+            red_teams = [_resolve_team_number(team) for team in (row["red_team1"], row["red_team2"]) if team is not None]
+            blue_teams = [_resolve_team_number(team) for team in (row["blue_team1"], row["blue_team2"]) if team is not None]
+            session_value = row["session"]
+            session = str(session_value or "").strip()
             match_number = row["match"]
             field_id = int(row["field_id"]) if row["field_id"] is not None else None
-            round_label = f"{session}{match_number}" if session and match_number is not None else str(row["id"])
+            if session in {"0", "", "None"}:
+                session_label = "Q"
+                match_type = "Q"
+            else:
+                session_label = session
+                match_type = session or "unknown"
+            round_label = f"{session_label}{match_number}" if match_number is not None else str(row["id"])
+            scored = int(row["scored"] or 0)
             red_score = float(row["red_score"]) if row["red_score"] is not None else None
             blue_score = float(row["blue_score"]) if row["blue_score"] is not None else None
-            status = "completed" if int(row["scored"] or 0) == 1 or (red_score is not None and blue_score is not None) else "scheduled"
+            status = "completed" if scored == 1 else "scheduled"
+            scheduled_epoch = row["time_scheduled"]
+            scheduled_time = None
+            if scheduled_epoch not in (None, ""):
+                try:
+                    scheduled_time = datetime.fromtimestamp(float(scheduled_epoch), tz=timezone.utc).isoformat()
+                except (TypeError, ValueError, OSError):
+                    scheduled_time = str(scheduled_epoch)
             matches.append(
                 {
                     "match_key": round_label,
                     "event_sku": self.settings.event_sku,
                     "division_name": division_name,
-                    "match_type": session or "unknown",
+                    "match_type": match_type,
                     "round_label": round_label,
                     "instance": row["instance"],
                     "status": status,
-                    "scheduled_time": str(row["time_scheduled"]) if row["time_scheduled"] is not None else None,
-                    "completed_time": str(row["time_scheduled"]) if status == "completed" and row["time_scheduled"] is not None else None,
+                    "scheduled_time": scheduled_time,
+                    "completed_time": scheduled_time if status == "completed" else None,
                     "field_id": field_id,
                     "field_name": field_map.get(field_id),
                     "red_score": red_score,
