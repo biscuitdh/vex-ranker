@@ -7,7 +7,7 @@
   {% set current_threat_dir = threat_dir if threat_dir is defined else "desc" %}
   {% call ui.page_intro("AI Rankings", "Hourly Ranking Intelligence", "A 7157B-centered scouting brief synthesized from official standings, power metrics, skills, threats, alliance effects, and source quality.") %}
     <a class="header-action" href="{{ '/' if not static_site else '../index.html' }}">Back To Dashboard</a>
-    <a class="header-action" href="{{ '/rankings' if not static_site else '../rankings/' }}">Open Rankings</a>
+    <a class="header-action" href="{{ '/matches' if not static_site else '../matches/' }}">Open Matches</a>
     {% if not static_site %}
       <form method="post" action="/actions/refresh-ai-rankings">
         <button type="submit" class="header-action">Refresh AI Rankings</button>
@@ -132,7 +132,7 @@
               </tr>
             </thead>
             <tbody>
-              {% for item in ai.threat_rows %}
+              {% for item in ai.threat_rows[:(6 if static_site else ai.threat_rows|length)] %}
                 <tr>
                   <td>{{ item.team_number }}</td>
                   <td>{{ item.official_rank if item.official_rank is not none else "N/A" }}</td>
@@ -161,7 +161,7 @@
               <tr><th>Match</th><th>Opponents</th><th>When</th><th>Swing</th><th>Call</th></tr>
             </thead>
             <tbody>
-              {% for item in ai.swing_rows %}
+              {% for item in ai.swing_rows[:(5 if static_site else ai.swing_rows|length)] %}
                 <tr>
                   <td>{{ item.round_label or item.match_key }}</td>
                   <td>{{ ", ".join(item.opponent_teams) if item.opponent_teams else item.opponent or "TBD" }}</td>
@@ -218,7 +218,7 @@
               <tr><th>Team</th><th>Previous</th><th>Current</th><th>Move</th></tr>
             </thead>
             <tbody>
-              {% for item in ai.top_movers %}
+              {% for item in ai.top_movers[:(6 if static_site else ai.top_movers|length)] %}
                 <tr>
                   <td>{{ item.team_number }}</td>
                   <td>{{ item.previous_power_rank }}</td>

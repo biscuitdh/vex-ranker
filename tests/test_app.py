@@ -35,6 +35,9 @@ class SettingsTests(unittest.TestCase):
                 self.assertFalse(settings.enable_optional_social)
                 self.assertFalse(settings.enable_browser_fallback)
                 self.assertTrue(settings.enable_vexvia_local)
+                self.assertTrue(settings.enable_auto_heal)
+                self.assertTrue(settings.enable_service_restart)
+                self.assertEqual(settings.healthcheck_interval_minutes, 60)
                 self.assertAlmostEqual(settings.power_rank_weight_official, 0.35)
                 self.assertTrue(settings.data_dir.exists())
 
@@ -893,6 +896,297 @@ class AIRankingsTests(unittest.TestCase):
         self.assertEqual(payload["confidence"]["level"], "low")
 
 
+def _seed_healthy_dashboard_state(connection: sqlite3.Connection) -> None:
+    """Insert a minimal healthy dashboard dataset."""
+    snapshot_at = "2026-04-22T12:00:00+00:00"
+    connection.execute(
+        """
+        INSERT INTO competition_snapshots (
+            event_sku, event_name, division_name, team_number, team_name, school_name,
+            rank, wins, losses, ties, wp, ap, sp, average_score, record_text, source, fetched_at, raw_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "RE",
+            "Worlds",
+            "Technology",
+            "7157B",
+            "Mystery Machine",
+            "Chittenango",
+            4,
+            2,
+            1,
+            0,
+            4,
+            6,
+            22,
+            30,
+            "2-1-0",
+            "vex_via_local",
+            snapshot_at,
+            "{}",
+        ),
+    )
+    db.record_division_rankings(
+        connection,
+        snapshot_at,
+        [
+            {
+                "event_sku": "RE",
+                "division_name": "Technology",
+                "team_number": "7157B",
+                "team_name": "Mystery Machine",
+                "organization": "Chittenango",
+                "rank": 4,
+                "wins": 2,
+                "losses": 1,
+                "ties": 0,
+                "wp": 4,
+                "ap": 6,
+                "sp": 22,
+                "average_score": 30,
+                "record_text": "2-1-0",
+                "source": "vex_via_local",
+                "source_state": "live",
+                "result_tab": "vex_via_local_rankings",
+                "source_updated_at": snapshot_at,
+            }
+        ],
+    )
+    connection.execute(
+        """
+        INSERT INTO derived_metrics_snapshots (
+            snapshot_at, event_sku, division_name, team_number, official_rank, skills_total,
+            opr, dpr, ccwm, recent_form, composite_score, power_rank, raw_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            snapshot_at,
+            "RE",
+            "Technology",
+            "7157B",
+            4,
+            60.0,
+            12.4,
+            -1.2,
+            13.6,
+            5.0,
+            0.88,
+            5,
+            "{}",
+        ),
+    )
+    db.record_ai_rankings_snapshot(
+        connection,
+        "7157B",
+        {
+            "generated_at": "2026-04-22T12:05:00+00:00",
+            "source_snapshot_at": snapshot_at,
+            "source_type": "vex_via_local",
+            "confidence": {"level": "high"},
+            "headline": "Healthy snapshot.",
+        },
+    )
+    db.record_collector_run(connection, "robotevents", snapshot_at, snapshot_at, True, 1, "")
+    db.record_collector_run(connection, "ai_rankings", "2026-04-22T12:05:00+00:00", "2026-04-22T12:05:00+00:00", True, 1, "")
+
+
+class DashboardHealthTests(unittest.TestCase):
+    """Health evaluation and self-heal tests."""
+
+    def test_evaluate_dashboard_health_reports_healthy_view(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                "os.environ",
+                {
+                    "BASE_DIR": tmp,
+                    "TIMEZONE": "UTC",
+                    "DASHBOARD_STALE_MINUTES": "5000000",
+                    "AI_RANKINGS_STALE_MINUTES": "5000000",
+                },
+                clear=True,
+            ):
+                settings = config.load_settings(env_file=None)
+                with db.db_session(settings.db_path) as connection:
+                    db.init_db(connection)
+                    _seed_healthy_dashboard_state(connection)
+                    with (
+                        patch("storage.db._gui_surface_health", return_value={"name": "gui_surface", "status": "healthy", "summary": "GUI healthy."}),
+                        patch("storage.db._published_surface_health", return_value={"name": "published_surface", "status": "healthy", "summary": "Published healthy."}),
+                        patch("storage.db._notification_path_health", return_value={"name": "notification_path", "status": "healthy", "summary": "Discord healthy."}),
+                        patch("storage.db._service_supervision_health", return_value={"name": "service_supervision", "status": "healthy", "summary": "Services healthy."}),
+                    ):
+                        health = db.evaluate_dashboard_health(connection, settings)
+                self.assertEqual(health["status"], "healthy")
+                self.assertTrue(health["healthy"])
+                self.assertEqual(health["components"]["gui_surface"]["status"], "healthy")
+
+    def test_evaluate_dashboard_health_reports_gui_failure_and_publish_degrade(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                "os.environ",
+                {
+                    "BASE_DIR": tmp,
+                    "TIMEZONE": "UTC",
+                    "DASHBOARD_STALE_MINUTES": "5000000",
+                    "AI_RANKINGS_STALE_MINUTES": "5000000",
+                },
+                clear=True,
+            ):
+                settings = config.load_settings(env_file=None)
+                with db.db_session(settings.db_path) as connection:
+                    db.init_db(connection)
+                    _seed_healthy_dashboard_state(connection)
+                    with (
+                        patch("storage.db._gui_surface_health", return_value={"name": "gui_surface", "status": "failed", "summary": "GUI unreachable."}),
+                        patch("storage.db._published_surface_health", return_value={"name": "published_surface", "status": "degraded", "summary": "Static site stale."}),
+                        patch("storage.db._notification_path_health", return_value={"name": "notification_path", "status": "healthy", "summary": "Discord healthy."}),
+                        patch("storage.db._service_supervision_health", return_value={"name": "service_supervision", "status": "healthy", "summary": "Services healthy."}),
+                    ):
+                        health = db.evaluate_dashboard_health(connection, settings)
+                self.assertEqual(health["status"], "failed")
+                self.assertIn("GUI unreachable", health["reason_summary"])
+
+    def test_run_self_heal_recovers_before_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict("os.environ", {"BASE_DIR": tmp, "MAX_AUTO_REPAIR_ATTEMPTS": "1"}, clear=True):
+                settings = config.load_settings(env_file=None)
+                unhealthy = {
+                    "status": "failed",
+                    "healthy": False,
+                    "reason_summary": "Rankings are stale.",
+                    "reasons": ["Rankings are stale."],
+                }
+                healthy = {
+                    "status": "healthy",
+                    "healthy": True,
+                    "reason_summary": "Healthy.",
+                    "reasons": [],
+                }
+                with (
+                    patch("main.evaluate_dashboard_health", side_effect=[unhealthy, unhealthy, healthy]),
+                    patch("main.run_competition_cycle", return_value={}) as mock_comp,
+                    patch("main.run_ai_rankings_cycle", return_value={}) as mock_ai,
+                    patch("main.write_reports", return_value={}) as mock_reports,
+                    patch("main.write_static_site", return_value={}) as mock_static,
+                    patch("main.publish_static_site", return_value={}) as mock_publish,
+                    patch("main.restart_managed_services", return_value={"status": "success"}) as mock_restart,
+                    patch("main.send_health_transition_alert", return_value=False),
+                ):
+                    result = main.run_self_heal_cycle(settings)
+                self.assertEqual(result["status"], "healthy")
+                self.assertEqual(len(result["repair_attempts"]), 1)
+                mock_comp.assert_called_once()
+                mock_ai.assert_called_once()
+                mock_reports.assert_called_once()
+                mock_static.assert_called_once()
+                mock_publish.assert_not_called()
+                mock_restart.assert_not_called()
+
+    def test_run_self_heal_escalates_restart_after_failed_repairs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict("os.environ", {"BASE_DIR": tmp, "MAX_AUTO_REPAIR_ATTEMPTS": "1"}, clear=True):
+                settings = config.load_settings(env_file=None)
+                unhealthy = {
+                    "status": "failed",
+                    "healthy": False,
+                    "reason_summary": "Dashboard still unhealthy.",
+                    "reasons": ["Dashboard still unhealthy."],
+                }
+                with (
+                    patch("main.evaluate_dashboard_health", side_effect=[unhealthy, unhealthy, unhealthy, unhealthy]),
+                    patch("main.run_competition_cycle", return_value={}),
+                    patch("main.run_ai_rankings_cycle", return_value={}),
+                    patch("main.write_reports", return_value={}),
+                    patch("main.write_static_site", return_value={}),
+                    patch("main.publish_static_site", return_value={}),
+                    patch("main.restart_managed_services", return_value={"status": "success", "message": "Restarted.", "results": []}) as mock_restart,
+                    patch("main.send_health_transition_alert", return_value=False),
+                ):
+                    result = main.run_self_heal_cycle(settings)
+                self.assertEqual(result["status"], "restart_requested")
+                mock_restart.assert_called_once_with(settings, ["backend", "gui"])
+
+    def test_run_self_heal_honors_restart_cooldown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                "os.environ",
+                {"BASE_DIR": tmp, "RESTART_COOLDOWN_MINUTES": "120", "MAX_AUTO_REPAIR_ATTEMPTS": "1"},
+                clear=True,
+            ):
+                settings = config.load_settings(env_file=None)
+                with db.db_session(settings.db_path) as connection:
+                    db.init_db(connection)
+                    db.record_restart_event(
+                        connection,
+                        healthcheck_run_id=None,
+                        requested_at=db.utc_now(),
+                        completed_at=db.utc_now(),
+                        status="success",
+                        reason_summary="Earlier restart.",
+                        targets=["backend", "gui"],
+                        payload={"status": "success"},
+                    )
+                unhealthy = {
+                    "status": "failed",
+                    "healthy": False,
+                    "reason_summary": "Dashboard still unhealthy.",
+                    "reasons": ["Dashboard still unhealthy."],
+                }
+                with (
+                    patch("main.evaluate_dashboard_health", side_effect=[unhealthy, unhealthy, unhealthy, unhealthy]),
+                    patch("main.run_competition_cycle", return_value={}),
+                    patch("main.run_ai_rankings_cycle", return_value={}),
+                    patch("main.write_reports", return_value={}),
+                    patch("main.write_static_site", return_value={}),
+                    patch("main.publish_static_site", return_value={}),
+                    patch("main.restart_managed_services") as mock_restart,
+                    patch("main.send_health_transition_alert", return_value=False),
+                ):
+                    result = main.run_self_heal_cycle(settings)
+                self.assertEqual(result["restart"]["status"], "skipped")
+                mock_restart.assert_not_called()
+
+    def test_health_transition_alerts_on_status_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict("os.environ", {"BASE_DIR": tmp, "DISCORD_WEBHOOK_URL": "https://discord.example/webhook"}, clear=True):
+                settings = config.load_settings(env_file=None)
+                with db.db_session(settings.db_path) as connection:
+                    db.init_db(connection)
+                    sent = []
+
+                    def _send(_settings, payload, client=None):
+                        sent.append(payload["content"])
+
+                    with patch("notify.discord.send_discord_message", side_effect=_send):
+                        previous = {"status": "healthy"}
+                        current = {
+                            "status": "failed",
+                            "checked_at": "2026-04-23T12:00:00+00:00",
+                            "reason_summary": "GUI unreachable.",
+                            "components": {"gui_surface": {"status": "failed", "summary": "GUI unreachable."}},
+                        }
+                        result = main.send_health_transition_alert(connection, settings, previous, current)
+                self.assertTrue(result)
+                self.assertTrue(any("dashboard health is now failed" in item.lower() for item in sent))
+
+    def test_gui_surface_health_reports_probe_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict("os.environ", {"BASE_DIR": tmp}, clear=True):
+                settings = config.load_settings(env_file=None)
+                with patch("storage.db.httpx.Client.get", side_effect=httpx.ConnectError("boom")):
+                    component = db._gui_surface_health(settings)
+                self.assertEqual(component["status"], "failed")
+
+    def test_notification_path_health_reports_degraded_on_http_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict("os.environ", {"BASE_DIR": tmp, "DISCORD_WEBHOOK_URL": "https://discord.example/webhook"}, clear=True):
+                settings = config.load_settings(env_file=None)
+                with patch("storage.db.httpx.Client.get", return_value=httpx.Response(500)):
+                    component = db._notification_path_health(settings)
+                self.assertEqual(component["status"], "degraded")
+
+
 class StaticExportTests(unittest.TestCase):
     """Static site export and publish-guard tests."""
 
@@ -1000,13 +1294,15 @@ class StaticExportTests(unittest.TestCase):
                     view = db.build_dashboard_view(connection, settings.team_number)
                 result = export_static_site(repo_base, settings, view)
                 self.assertTrue((site_dir / "index.html").exists())
-                self.assertTrue((site_dir / "rankings" / "index.html").exists())
+                self.assertTrue((site_dir / "ai-rankings" / "index.html").exists())
+                self.assertTrue((site_dir / "matches" / "index.html").exists())
                 self.assertTrue((site_dir / "data" / "latest.json").exists())
                 dashboard_html = (site_dir / "index.html").read_text(encoding="utf-8")
-                settings_html = (site_dir / "settings" / "index.html").read_text(encoding="utf-8")
-                self.assertIn("Snapshot Dashboard", dashboard_html)
+                ai_html = (site_dir / "ai-rankings" / "index.html").read_text(encoding="utf-8")
+                self.assertIn("Match Day View", dashboard_html)
                 self.assertNotIn("Run Refresh", dashboard_html)
-                self.assertNotIn(str(db_path), settings_html)
+                self.assertIn("Open AI Rankings", dashboard_html)
+                self.assertNotIn(str(db_path), ai_html)
                 self.assertEqual(Path(result["site_dir"]).resolve(), site_dir.resolve())
 
     def test_publish_to_git_repo_requires_configured_repo(self) -> None:
@@ -1030,18 +1326,21 @@ class StaticExportTests(unittest.TestCase):
 class MainTests(unittest.TestCase):
     """Scheduler tests."""
 
-    def test_scheduler_registers_ai_rankings_job(self) -> None:
+    def test_scheduler_registers_ai_rankings_and_self_heal_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict("os.environ", {"BASE_DIR": tmp}, clear=True):
                 settings = config.load_settings(env_file=None)
                 scheduler = main.build_scheduler(settings)
         job_ids = {job.id for job in scheduler.get_jobs()}
         self.assertIn("ai_rankings", job_ids)
+        self.assertIn("self_heal", job_ids)
 
-    def test_parse_args_accepts_publish_static(self) -> None:
-        with patch("sys.argv", ["main.py", "--publish-static"]):
+    def test_parse_args_accepts_publish_static_and_self_heal(self) -> None:
+        with patch("sys.argv", ["main.py", "--publish-static", "--once", "--collector", "self_heal"]):
             args = main.parse_args()
         self.assertTrue(args.publish_static)
+        self.assertTrue(args.once)
+        self.assertEqual(args.collector, "self_heal")
 
 if __name__ == "__main__":
     unittest.main()

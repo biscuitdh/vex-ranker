@@ -182,3 +182,51 @@ def send_media_alerts(
         record_alert(connection, alert_key, "media")
         sent += 1
     return sent
+
+
+def send_health_transition_alert(
+    connection,
+    settings: Settings,
+    previous_health: dict[str, Any] | None,
+    current_health: dict[str, Any],
+    client: httpx.Client | None = None,
+) -> bool:
+    """Notify Discord when match-day health transitions."""
+    if not settings.discord_webhook_url:
+        return False
+
+    previous_status = str((previous_health or {}).get("status") or "").lower()
+    current_status = str(current_health.get("status") or "").lower()
+    if not current_status:
+        return False
+
+    should_alert = False
+    if current_status in {"degraded", "failed"}:
+        should_alert = previous_status != current_status
+    elif current_status == "healthy" and previous_status in {"degraded", "failed"}:
+        should_alert = True
+    if not should_alert:
+        return False
+
+    checked_at = str(current_health.get("checked_at") or current_health.get("freshness", {}).get("latest_snapshot_at") or "")
+    alert_key = make_alert_key("health_transition", f"{previous_status}->{current_status}:{checked_at}")
+    if alert_already_sent(connection, alert_key):
+        return False
+
+    component_lines: list[str] = []
+    for name, component in (current_health.get("components") or {}).items():
+        status = str(component.get("status") or "unknown")
+        if status == "healthy":
+            continue
+        label = name.replace("_", " ")
+        component_lines.append(f"{label}: {component.get('summary')}")
+    summary = current_health.get("reason_summary") or "No summary available."
+    if current_status == "healthy":
+        content = f"Vex Ranker recovery: dashboard health returned to healthy. {summary}"
+    else:
+        suffix = f" Details: {' | '.join(component_lines[:3])}" if component_lines else ""
+        content = f"Vex Ranker alert: dashboard health is now {current_status}. {summary}{suffix}"
+
+    send_discord_message(settings, {"content": content}, client=client)
+    record_alert(connection, alert_key, "health_transition")
+    return True

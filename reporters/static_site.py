@@ -22,13 +22,8 @@ LOGGER = logging.getLogger(__name__)
 
 PAGE_SPECS: dict[str, tuple[str, str]] = {
     "dashboard": ("index.html", "gui_dashboard.html.j2"),
-    "analysis": ("analysis/index.html", "gui_analysis.html.j2"),
     "ai_rankings": ("ai-rankings/index.html", "gui_ai_rankings.html.j2"),
-    "rankings": ("rankings/index.html", "gui_rankings.html.j2"),
     "matches": ("matches/index.html", "gui_matches.html.j2"),
-    "media": ("media/index.html", "gui_media.html.j2"),
-    "history": ("history/index.html", "gui_history.html.j2"),
-    "settings": ("settings/index.html", "gui_settings.html.j2"),
 }
 
 
@@ -59,13 +54,8 @@ def _nav_items(current_key: str) -> list[tuple[str, str, str]]:
     """Build navigation links for the static site."""
     labels = {
         "dashboard": "Dashboard",
-        "analysis": "Analysis",
         "ai_rankings": "AI Rankings",
-        "rankings": "Rankings",
         "matches": "Matches",
-        "media": "Media",
-        "history": "History",
-        "settings": "Settings",
     }
     return [(key, _relative_href(key, current_key), labels[key]) for key in PAGE_SPECS]
 
@@ -106,14 +96,6 @@ def _page_payloads(view: dict[str, Any], settings: Settings, exported_at: str) -
     base = render_json_export(view)
     payloads: dict[str, dict[str, Any]] = {
         "dashboard": base,
-        "analysis": {
-            "generated_at": exported_at,
-            "analysis": view.get("analysis"),
-            "rank_trend": view.get("rank_trend"),
-            "power_trend": view.get("power_trend"),
-            "threat_list": (view.get("threat_list") or [])[:10],
-            "rankings_status": view.get("rankings_status"),
-        },
         "ai-rankings": {
             "generated_at": exported_at,
             "ai_rankings": view.get("ai_rankings"),
@@ -121,18 +103,6 @@ def _page_payloads(view: dict[str, Any], settings: Settings, exported_at: str) -
             "previous_snapshot": view.get("previous_snapshot"),
             "delta": view.get("delta"),
             "match_intelligence": view.get("match_intelligence"),
-        },
-        "rankings": {
-            "generated_at": exported_at,
-            "rankings_status": view.get("rankings_status"),
-            "latest_snapshot": view.get("latest_snapshot"),
-            "team_power": view.get("team_power"),
-            "team_skill": view.get("team_skill"),
-            "division_rankings": view.get("division_rankings"),
-            "skills_rankings": view.get("skills_rankings"),
-            "power_rankings": view.get("power_rankings"),
-            "biggest_movers": view.get("biggest_movers"),
-            "threat_list": view.get("threat_list"),
         },
         "matches": {
             "generated_at": exported_at,
@@ -143,38 +113,6 @@ def _page_payloads(view: dict[str, Any], settings: Settings, exported_at: str) -
             "alliance_impact": view.get("alliance_impact"),
             "recent_completed_matches": view.get("recent_completed_matches"),
             "upcoming_matches": view.get("upcoming_matches"),
-        },
-        "media": {
-            "generated_at": exported_at,
-            "recent_media": view.get("recent_media"),
-            "collector_runs": view.get("collector_runs"),
-        },
-        "history": {
-            "generated_at": exported_at,
-            "snapshot_history": view.get("snapshot_history"),
-            "collector_runs": view.get("collector_runs"),
-        },
-        "settings": {
-            "generated_at": exported_at,
-            "event_sku": settings.event_sku,
-            "event_name_alias": settings.event_name_alias,
-            "livestream_url": settings.livestream_url,
-            "division_name": settings.division_name,
-            "team_number": settings.team_number,
-            "team_name_alias": settings.team_name_alias,
-            "school_alias": settings.school_alias,
-            "poll_interval_minutes": settings.poll_interval_minutes,
-            "media_interval_minutes": settings.media_interval_minutes,
-            "media_confidence_notify_min": settings.media_confidence_notify_min,
-            "power_rank_weights": {
-                "official": settings.power_rank_weight_official,
-                "opr": settings.power_rank_weight_opr,
-                "dpr": settings.power_rank_weight_dpr,
-                "ccwm": settings.power_rank_weight_ccwm,
-                "skills": settings.power_rank_weight_skills,
-                "form": settings.power_rank_weight_form,
-                "recent_match_count": settings.power_rank_recent_match_count,
-            },
         },
     }
     return {name: _json_safe(payload) for name, payload in payloads.items()}
@@ -198,6 +136,12 @@ def export_static_site(base_dir: Path, settings: Settings, view: dict[str, Any])
     environment = _template_environment(base_dir)
     exported_at = utc_now()
     site_dir = settings.static_site_dir
+    if site_dir.exists():
+        for child in site_dir.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
     site_dir.mkdir(parents=True, exist_ok=True)
     data_dir = site_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -287,7 +231,9 @@ def publish_to_git_repo(settings: Settings) -> dict[str, Any]:
 
     try:
         current_branch = _run_git(repo_path, "branch", "--show-current").stdout.strip()
-        if settings.publish_branch and current_branch and current_branch != settings.publish_branch:
+        if settings.publish_branch and not current_branch:
+            _run_git(repo_path, "checkout", "-B", settings.publish_branch)
+        elif settings.publish_branch and current_branch != settings.publish_branch:
             _run_git(repo_path, "checkout", settings.publish_branch)
         _sync_publish_tree(site_dir, repo_path)
         status = _run_git(repo_path, "status", "--porcelain").stdout.strip()

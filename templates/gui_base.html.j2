@@ -80,6 +80,11 @@
       .badge.source-vex-via-local { color: #9ed0ff; border-color: rgba(87, 160, 255, 0.35); background: rgba(87, 160, 255, 0.12); }
       .badge.source-observed-vex-via { color: #ffd77d; border-color: rgba(243, 180, 84, 0.35); background: rgba(243, 180, 84, 0.14); }
       .badge.source-unknown { color: var(--muted); }
+      .badge.health-healthy { color: var(--success); border-color: rgba(78, 211, 154, 0.35); background: rgba(78, 211, 154, 0.12); }
+      .badge.health-degraded { color: var(--warning); border-color: rgba(243, 180, 84, 0.35); background: rgba(243, 180, 84, 0.12); }
+      .badge.health-failed { color: var(--danger); border-color: rgba(255, 123, 114, 0.4); background: rgba(255, 123, 114, 0.14); }
+      .badge.health-restart-requested { color: #ffd77d; border-color: rgba(243, 180, 84, 0.35); background: rgba(243, 180, 84, 0.14); }
+      .badge.health-unknown { color: var(--muted); }
       .section-label {
         display: inline-block;
         padding: 5px 10px;
@@ -263,6 +268,9 @@
             <div class="header-tools">
               <div class="chip">{{ status_banner.headline }}</div>
               <div class="chip">{{ status_banner.subtext }}</div>
+              {% if dashboard_health %}
+                <div class="badge health-{{ dashboard_health.status or 'unknown' }}">Automation {{ (dashboard_health.status or "unknown")|title }}</div>
+              {% endif %}
               {% if media_state and not static_site %}
                 <div class="chip">Media Watcher {{ media_state.status|title if media_state.status else "Idle" }}</div>
               {% endif %}

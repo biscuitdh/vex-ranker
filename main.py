@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 from pathlib import Path
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -15,6 +16,7 @@ from collectors.robotevents import RobotEventsCollector, RobotEventsResult
 from collectors.vexvia_local import VexViaLocalCollector
 from config import Settings, load_settings
 from notify.discord import (
+    send_health_transition_alert,
     send_match_alerts,
     send_media_alerts,
     send_power_rank_alert,
@@ -28,8 +30,12 @@ from storage.db import (
     build_dashboard_view,
     compute_and_store_derived_metrics,
     db_session,
+    evaluate_dashboard_health,
+    get_latest_healthcheck_run,
     generate_ai_rankings_snapshot,
+    get_latest_restart_event,
     get_latest_team_skill,
+    parse_timestamp,
     get_previous_snapshot,
     get_previous_team_power,
     init_db,
@@ -37,14 +43,30 @@ from storage.db import (
     record_collector_run,
     record_competition_snapshot,
     record_division_rankings,
+    record_healthcheck_run,
+    record_repair_attempt,
+    record_restart_event,
     record_skills_snapshot,
     upsert_division_matches,
     upsert_matches,
     utc_now,
 )
 from utils.logging import configure_logging
+from utils.service_control import restart_managed_services
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _health_payload_from_row(row: dict[str, object] | None) -> dict[str, object] | None:
+    """Decode a persisted healthcheck payload."""
+    if not row or row.get("raw_json") in (None, ""):
+        return None
+    try:
+        import json
+
+        return json.loads(str(row["raw_json"]))
+    except Exception:
+        return None
 
 
 def _power_weights(settings: Settings) -> dict[str, float]:
@@ -185,7 +207,7 @@ def run_competition_cycle(settings: Settings) -> dict[str, object]:
                 "; ".join(result.warnings),
             )
             ai_rankings = generate_ai_rankings_snapshot(connection, settings.team_number)
-            view = build_dashboard_view(connection, settings.team_number)
+            view = build_dashboard_view(connection, settings.team_number, settings)
             with httpx.Client(timeout=settings.request_timeout_seconds) as discord_client:
                 send_rank_alert(connection, settings, view["latest_snapshot"], view["delta"], client=discord_client)
                 send_power_rank_alert(connection, settings, view.get("team_power"), view.get("power_delta", {}), client=discord_client)
@@ -262,7 +284,7 @@ def write_reports(settings: Settings) -> dict[str, str]:
     """Write the latest markdown and JSON reports."""
     with db_session(settings.db_path) as connection:
         init_db(connection)
-        view = build_dashboard_view(connection, settings.team_number)
+        view = build_dashboard_view(connection, settings.team_number, settings)
         markdown_path = write_markdown_report(settings.reports_dir, view)
         json_path = write_json_export(settings.reports_dir, view)
         return {"markdown": str(markdown_path), "json": str(json_path)}
@@ -272,13 +294,36 @@ def build_current_view(settings: Settings) -> dict[str, object]:
     """Load the latest dashboard view from SQLite."""
     with db_session(settings.db_path) as connection:
         init_db(connection)
-        return build_dashboard_view(connection, settings.team_number)
+        return build_dashboard_view(connection, settings.team_number, settings)
 
 
 def write_static_site(settings: Settings) -> dict[str, str]:
     """Render the static site bundle from the latest stored view."""
-    view = build_current_view(settings)
-    return export_static_site(settings.base_dir, settings, view)
+    started_at = utc_now()
+    try:
+        view = build_current_view(settings)
+        result = export_static_site(settings.base_dir, settings, view)
+        with db_session(settings.db_path) as connection:
+            init_db(connection)
+            record_collector_run(connection, "static_site", started_at, utc_now(), True, 1, "")
+        return result
+    except Exception as exc:
+        with db_session(settings.db_path) as connection:
+            init_db(connection)
+            record_collector_run(connection, "static_site", started_at, utc_now(), False, 0, str(exc))
+        raise
+
+
+def publish_static_site(settings: Settings) -> dict[str, object]:
+    """Publish the current static site when publishing is configured."""
+    started_at = utc_now()
+    result = publish_to_git_repo(settings)
+    success = bool(result.get("published")) or str(result.get("reason") or "") == "No site changes to publish."
+    summary = str(result.get("reason") or "")
+    with db_session(settings.db_path) as connection:
+        init_db(connection)
+        record_collector_run(connection, "publish_static", started_at, utc_now(), success, int(bool(result.get("published"))), summary)
+    return result
 
 
 def run_static_publish(settings: Settings) -> dict[str, object]:
@@ -300,7 +345,7 @@ def run_static_publish(settings: Settings) -> dict[str, object]:
         results["refresh"]["ai_rankings"] = {"error": str(exc)}
     results["reports"] = write_reports(settings)
     results["site"] = write_static_site(settings)
-    results["publish"] = publish_to_git_repo(settings)
+    results["publish"] = publish_static_site(settings)
     return results
 
 
@@ -334,6 +379,282 @@ def run_ai_rankings_cycle(settings: Settings) -> dict[str, object]:
             raise
 
 
+def run_dashboard_healthcheck(settings: Settings) -> dict[str, object]:
+    """Evaluate dashboard health and persist the result."""
+    started_at = utc_now()
+    with db_session(settings.db_path) as connection:
+        init_db(connection)
+        previous_health = _health_payload_from_row(get_latest_healthcheck_run(connection))
+        payload = evaluate_dashboard_health(connection, settings)
+        completed_at = utc_now()
+        healthcheck_id = record_healthcheck_run(
+            connection,
+            started_at=started_at,
+            completed_at=completed_at,
+            status=str(payload.get("status") or "unknown"),
+            reason_summary=str(payload.get("reason_summary") or ""),
+            payload=payload,
+        )
+        payload["healthcheck_run_id"] = healthcheck_id
+        payload["checked_at"] = completed_at
+        try:
+            with httpx.Client(timeout=settings.request_timeout_seconds) as discord_client:
+                send_health_transition_alert(connection, settings, previous_health, payload, client=discord_client)
+        except Exception as exc:
+            LOGGER.warning("Health transition alert failed", extra={"error": str(exc)})
+        return payload
+
+
+def _restart_allowed(settings: Settings, latest_restart_event: dict[str, object] | None) -> tuple[bool, str]:
+    """Return whether a managed restart is currently allowed."""
+    if not settings.enable_service_restart:
+        return False, "Managed service restart is disabled."
+    if not latest_restart_event:
+        return True, ""
+    requested_at = parse_timestamp(str(latest_restart_event.get("requested_at") or ""))
+    if requested_at is None:
+        return True, ""
+    now = datetime.now(timezone.utc)
+    elapsed_minutes = (now - requested_at).total_seconds() / 60.0
+    if elapsed_minutes >= settings.restart_cooldown_minutes:
+        return True, ""
+    return (
+        False,
+        f"Restart cooldown active for another {round(settings.restart_cooldown_minutes - elapsed_minutes, 2)} minutes.",
+    )
+
+
+def _record_final_health_state(
+    connection,
+    *,
+    settings: Settings,
+    started_at: str,
+    previous_health: dict[str, object] | None,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    """Persist the final health payload and send any transition alert."""
+    completed_at = utc_now()
+    healthcheck_id = record_healthcheck_run(
+        connection,
+        started_at=started_at,
+        completed_at=completed_at,
+        status=str(payload.get("status") or "unknown"),
+        reason_summary=str(payload.get("reason_summary") or ""),
+        payload=payload,
+    )
+    payload["checked_at"] = completed_at
+    payload["healthcheck_run_id"] = healthcheck_id
+    try:
+        with httpx.Client(timeout=settings.request_timeout_seconds) as discord_client:
+            send_health_transition_alert(connection, settings, previous_health, payload, client=discord_client)
+    except Exception as exc:
+        LOGGER.warning("Health transition alert failed", extra={"error": str(exc)})
+    return payload
+
+
+def run_self_heal_cycle(settings: Settings) -> dict[str, object]:
+    """Check dashboard health, attempt repairs, and escalate to managed restarts if required."""
+    if not settings.enable_auto_heal:
+        return {
+            "status": "disabled",
+            "message": "Auto-heal is disabled.",
+            "repair_attempts": [],
+            "restart": {},
+        }
+
+    started_at = utc_now()
+    with db_session(settings.db_path) as connection:
+        init_db(connection)
+        previous_health = _health_payload_from_row(get_latest_healthcheck_run(connection))
+        initial_health = evaluate_dashboard_health(connection, settings)
+        healthcheck_id = record_healthcheck_run(
+            connection,
+            started_at=started_at,
+            completed_at=utc_now(),
+            status=str(initial_health.get("status") or "unknown"),
+            reason_summary=str(initial_health.get("reason_summary") or ""),
+            payload=initial_health,
+        )
+
+    result: dict[str, object] = {
+        "status": str(initial_health.get("status") or "unknown"),
+        "initial_health": initial_health,
+        "final_health": initial_health,
+        "healthcheck_run_id": healthcheck_id,
+        "repair_attempts": [],
+        "restart": {},
+    }
+    if initial_health.get("healthy"):
+        with db_session(settings.db_path) as connection:
+            init_db(connection)
+            final_health = _record_final_health_state(
+                connection,
+                settings=settings,
+                started_at=started_at,
+                previous_health=previous_health,
+                payload=initial_health,
+            )
+        result["final_health"] = final_health
+        result["message"] = "Dashboard health is already within threshold."
+        return result
+
+    for attempt_number in range(1, settings.max_auto_repair_attempts + 1):
+        attempt_started_at = utc_now()
+        actions: list[str] = []
+        errors: list[str] = []
+        for action_name, runner in (
+            ("competition", run_competition_cycle),
+            ("ai_rankings", run_ai_rankings_cycle),
+            ("reports", write_reports),
+        ):
+            try:
+                runner(settings)
+                actions.append(action_name)
+            except Exception as exc:
+                errors.append(f"{action_name}: {exc}")
+                LOGGER.warning(
+                    "Self-heal action failed",
+                    extra={"action": action_name, "attempt": attempt_number, "error": str(exc)},
+                )
+
+        with db_session(settings.db_path) as connection:
+            init_db(connection)
+            intermediate_health = evaluate_dashboard_health(connection, settings)
+        if intermediate_health.get("components", {}).get("gui_surface", {}).get("status") == "failed":
+            try:
+                restart_managed_services(settings, ["gui"])
+                actions.append("gui_restart")
+            except Exception as exc:
+                errors.append(f"gui_restart: {exc}")
+                LOGGER.warning("Self-heal GUI restart failed", extra={"attempt": attempt_number, "error": str(exc)})
+
+        try:
+            write_static_site(settings)
+            actions.append("static_site")
+        except Exception as exc:
+            errors.append(f"static_site: {exc}")
+            LOGGER.warning("Self-heal action failed", extra={"action": "static_site", "attempt": attempt_number, "error": str(exc)})
+
+        if settings.git_push_enabled or settings.github_pages_repo:
+            try:
+                publish_static_site(settings)
+                actions.append("publish_static")
+            except Exception as exc:
+                errors.append(f"publish_static: {exc}")
+                LOGGER.warning("Self-heal publish failed", extra={"attempt": attempt_number, "error": str(exc)})
+
+        with db_session(settings.db_path) as connection:
+            init_db(connection)
+            post_health = evaluate_dashboard_health(connection, settings)
+            attempt_payload = {
+                "attempt_number": attempt_number,
+                "actions": actions,
+                "errors": errors,
+                "post_health": post_health,
+            }
+            attempt_status = "success" if post_health.get("healthy") else "failed"
+            repair_attempt_id = record_repair_attempt(
+                connection,
+                healthcheck_run_id=healthcheck_id,
+                attempt_number=attempt_number,
+                started_at=attempt_started_at,
+                completed_at=utc_now(),
+                status=attempt_status,
+                error_summary="; ".join(errors[:6]),
+                payload=attempt_payload,
+            )
+        result["repair_attempts"].append(
+            {
+                "repair_attempt_id": repair_attempt_id,
+                "attempt_number": attempt_number,
+                "status": attempt_status,
+                "actions": actions,
+                "errors": errors,
+                "post_health": post_health,
+            }
+        )
+        result["final_health"] = post_health
+        result["status"] = str(post_health.get("status") or "unknown")
+        if post_health.get("healthy"):
+            with db_session(settings.db_path) as connection:
+                init_db(connection)
+                final_health = _record_final_health_state(
+                    connection,
+                    settings=settings,
+                    started_at=attempt_started_at,
+                    previous_health=previous_health,
+                    payload=post_health,
+                )
+            result["final_health"] = final_health
+            result["message"] = f"Dashboard recovered after repair attempt {attempt_number}."
+            return result
+
+    with db_session(settings.db_path) as connection:
+        init_db(connection)
+        latest_restart_event = get_latest_restart_event(connection)
+        latest_health = evaluate_dashboard_health(connection, settings)
+        restart_allowed, restart_reason = _restart_allowed(settings, latest_restart_event)
+
+    if not restart_allowed:
+        restart_payload = {
+            "status": "skipped",
+            "message": restart_reason,
+            "targets": ["backend", "gui"],
+            "results": [],
+        }
+        with db_session(settings.db_path) as connection:
+            init_db(connection)
+            restart_event_id = record_restart_event(
+                connection,
+                healthcheck_run_id=healthcheck_id,
+                requested_at=utc_now(),
+                completed_at=utc_now(),
+                status="skipped",
+                reason_summary=restart_reason,
+                targets=["backend", "gui"],
+                payload=restart_payload,
+            )
+            final_health = _record_final_health_state(
+                connection,
+                settings=settings,
+                started_at=started_at,
+                previous_health=previous_health,
+                payload=latest_health,
+            )
+        restart_payload["restart_event_id"] = restart_event_id
+        result["restart"] = restart_payload
+        result["final_health"] = final_health
+        result["message"] = restart_reason
+        return result
+
+    restart_payload = restart_managed_services(settings, ["backend", "gui"])
+    with db_session(settings.db_path) as connection:
+        init_db(connection)
+        restart_event_id = record_restart_event(
+            connection,
+            healthcheck_run_id=healthcheck_id,
+            requested_at=utc_now(),
+            completed_at=utc_now(),
+            status=str(restart_payload.get("status") or "unknown"),
+            reason_summary=str(latest_health.get("reason_summary") or "Dashboard remained unhealthy after repair attempts."),
+            targets=["backend", "gui"],
+            payload=restart_payload,
+        )
+        final_health = _record_final_health_state(
+            connection,
+            settings=settings,
+            started_at=started_at,
+            previous_health=previous_health,
+            payload=latest_health,
+        )
+    restart_payload["restart_event_id"] = restart_event_id
+    result["restart"] = restart_payload
+    result["final_health"] = final_health
+    result["status"] = "restart_requested" if restart_payload.get("status") != "failed" else "failed"
+    result["message"] = str(restart_payload.get("message") or "Managed service restart requested.")
+    return result
+
+
 def run_full_cycle(settings: Settings) -> dict[str, object]:
     """Run both collectors and generate reports."""
     results: dict[str, object] = {}
@@ -354,6 +675,14 @@ def build_scheduler(settings: Settings) -> BlockingScheduler:
     scheduler.add_job(run_competition_cycle, "interval", minutes=settings.poll_interval_minutes, args=[settings], id="competition")
     scheduler.add_job(run_media_cycle, "interval", minutes=settings.media_interval_minutes, args=[settings], id="media")
     scheduler.add_job(run_ai_rankings_cycle, "interval", hours=1, args=[settings], id="ai_rankings")
+    if settings.enable_auto_heal:
+        scheduler.add_job(
+            run_self_heal_cycle,
+            "interval",
+            minutes=settings.healthcheck_interval_minutes,
+            args=[settings],
+            id="self_heal",
+        )
     scheduler.add_job(run_daily_summary, "cron", hour=settings.daily_summary_hour, minute=0, args=[settings], id="daily_summary")
     return scheduler
 
@@ -364,7 +693,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--once", action="store_true", help="Run one full cycle and exit.")
     parser.add_argument(
         "--collector",
-        choices=("all", "robotevents", "media", "ai_rankings"),
+        choices=("all", "robotevents", "media", "ai_rankings", "self_heal", "healthcheck"),
         default="all",
         help="Run only one collector when using --once.",
     )
@@ -400,6 +729,13 @@ def main() -> None:
         if args.collector == "ai_rankings":
             run_ai_rankings_cycle(settings)
             write_reports(settings)
+            return
+        if args.collector == "self_heal":
+            run_self_heal_cycle(settings)
+            write_reports(settings)
+            return
+        if args.collector == "healthcheck":
+            run_dashboard_healthcheck(settings)
             return
         run_full_cycle(settings)
         return

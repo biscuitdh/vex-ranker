@@ -94,4 +94,42 @@
       </div>
     </section>
   </div>
+
+  <div class="split">
+    <section class="summary-card">
+      {{ ui.section_header("Automation", "Health And Repair Thresholds", "The dashboard should tell you when the robot data is stale, not smile politely while rotting.") }}
+      <table>
+        <tbody>
+          <tr><th>Auto Heal</th><td>{{ "Enabled" if settings.enable_auto_heal else "Disabled" }}</td></tr>
+          <tr><th>Healthcheck Interval</th><td>{{ settings.healthcheck_interval_minutes }} minutes</td></tr>
+          <tr><th>Dashboard Stale</th><td>{{ settings.dashboard_stale_minutes }} minutes</td></tr>
+          <tr><th>AI Stale</th><td>{{ settings.ai_rankings_stale_minutes }} minutes</td></tr>
+          <tr><th>Repair Attempts</th><td>{{ settings.max_auto_repair_attempts }}</td></tr>
+          <tr><th>Restart Cooldown</th><td>{{ settings.restart_cooldown_minutes }} minutes</td></tr>
+          <tr><th>Service Restart</th><td>{{ "Enabled" if settings.enable_service_restart else "Disabled" }}</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="summary-card">
+      {{ ui.section_header("Services", "Managed Restart Targets", "LaunchAgent labels only. No freehand process murder.") }}
+      <table>
+        <tbody>
+          <tr><th>Backend Label</th><td class="mono">{{ settings.backend_service_label }}</td></tr>
+          <tr><th>GUI Label</th><td class="mono">{{ settings.gui_service_label }}</td></tr>
+          {% if dashboard_health %}
+            <tr><th>Current Health</th><td>{{ dashboard_health.status|title }}</td></tr>
+            <tr><th>Reason</th><td>{{ dashboard_health.reason_summary }}</td></tr>
+          {% endif %}
+          <tr><th>Last Repair</th><td>{{ last_repair_attempt.completed_at if last_repair_attempt else "Never" }}</td></tr>
+          <tr><th>Last Restart</th><td>{{ last_restart_event.requested_at if last_restart_event else "Never" }}</td></tr>
+          {% if dashboard_health and dashboard_health.components %}
+            {% for name, component in dashboard_health.components.items() %}
+              <tr><th>{{ name.replace("_", " ")|title }}</th><td>{{ component.status|title }} · {{ component.summary }}</td></tr>
+            {% endfor %}
+          {% endif %}
+        </tbody>
+      </table>
+    </section>
+  </div>
 {% endblock %}

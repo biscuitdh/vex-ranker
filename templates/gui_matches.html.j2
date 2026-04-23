@@ -4,7 +4,19 @@
 {% block content %}
   {% call ui.page_intro("Matches", "Completed And Upcoming Matches", "Track what already happened and what is queued next for the team.") %}
     <a class="header-action" href="{{ '/' if not static_site else '../index.html' }}">Back To Dashboard</a>
+    {% if static_site %}
+      <a class="header-action" href="../ai-rankings/">Open AI Rankings</a>
+    {% endif %}
   {% endcall %}
+
+  {% if static_site %}
+  {{ ui.metric_grid([
+    {"label": "Next Match", "value": match_intelligence.next_match.round_label if match_intelligence and match_intelligence.next_match else "Unknown"},
+    {"label": "Next Time", "value": match_intelligence.next_match.scheduled_time if match_intelligence and match_intelligence.next_match and match_intelligence.next_match.scheduled_time else "TBD"},
+    {"label": "Next Field", "value": match_intelligence.next_match.field_name if match_intelligence and match_intelligence.next_match and match_intelligence.next_match.field_name else "TBD"},
+    {"label": "Last Result", "value": ((match_intelligence.last_match.score_for|string) ~ "-" ~ (match_intelligence.last_match.score_against|string)) if match_intelligence and match_intelligence.last_match and match_intelligence.last_match.score_for is not none and match_intelligence.last_match.score_against is not none else "Unknown"},
+  ]) }}
+  {% endif %}
 
   <div class="split">
     <section class="summary-card">
@@ -76,7 +88,7 @@
           <tr><th>Match</th><th>Time</th><th>Location</th><th>Alliance</th><th>Partners</th><th>Opponents</th><th>Partner Avg</th><th>Opponent Avg</th><th>Source</th><th>Call</th></tr>
         </thead>
         <tbody>
-          {% for item in upcoming_matchups %}
+          {% for item in upcoming_matchups[:(6 if static_site else upcoming_matchups|length)] %}
             <tr>
               <td>{{ item.round_label or item.match_key }}</td>
               <td>{{ item.scheduled_time or "TBD" }}</td>
@@ -107,7 +119,7 @@
             <tr><th>Match</th><th>Opponents</th><th>Scheduled</th><th>Avg Official</th><th>Avg Power</th><th>Swing</th></tr>
           </thead>
           <tbody>
-            {% for item in swing_matches %}
+            {% for item in swing_matches[:(5 if static_site else swing_matches|length)] %}
               <tr>
                 <td>{{ item.round_label or item.match_key }}</td>
                 <td>{{ ", ".join(item.opponent_teams) if item.opponent_teams else item.opponent or "TBD" }}</td>
@@ -125,6 +137,7 @@
     </section>
   </div>
 
+  {% if not static_site %}
   <div class="split">
     <section class="summary-card">
       {{ ui.section_header("Alliance", "Partner Impact", "Which partners have coincided with the strongest observed margins for 7157B so far.") }}
@@ -225,4 +238,5 @@
       {% endif %}
     </section>
   </div>
+  {% endif %}
 {% endblock %}

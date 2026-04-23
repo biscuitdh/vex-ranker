@@ -31,6 +31,26 @@ def _source_health(rankings_status: dict[str, Any], collector_runs: list[dict[st
     return "No reliable official standings source is active yet."
 
 
+def _automation_health(view: dict[str, Any]) -> str:
+    """Summarize self-heal status for operators."""
+    dashboard_health = view.get("dashboard_health") or {}
+    status = str(dashboard_health.get("status") or "unknown")
+    reason = dashboard_health.get("reason_summary") or "No health summary available."
+    repair = view.get("last_repair_attempt") or {}
+    restart = view.get("last_restart_event") or {}
+    parts = [f"Dashboard automation status is {status}."]
+    parts.append(str(reason))
+    if repair:
+        parts.append(
+            f"Latest repair attempt finished {repair.get('status', 'unknown')} at {repair.get('completed_at') or 'unknown time'}."
+        )
+    if restart:
+        parts.append(
+            f"Latest restart escalation is {restart.get('status', 'unknown')} at {restart.get('requested_at') or 'unknown time'}."
+        )
+    return " ".join(parts)
+
+
 def _team_brief(view: dict[str, Any]) -> str:
     """Build a focal-team summary paragraph."""
     snapshot = view.get("latest_snapshot")
@@ -250,6 +270,10 @@ def build_analysis(view: dict[str, Any]) -> dict[str, Any]:
         {
             "title": "Source Health",
             "body": _source_health(rankings_status, collector_runs),
+        },
+        {
+            "title": "Automation Health",
+            "body": _automation_health(view),
         },
         {
             "title": "Media Signal",

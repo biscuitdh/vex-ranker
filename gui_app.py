@@ -55,14 +55,16 @@ def status_banner(view: dict[str, object]) -> dict[str, str]:
     """Build a compact status summary for the header."""
     snapshot = view.get("latest_snapshot") or {}
     power_row = view.get("team_power") or {}
+    dashboard_health = view.get("dashboard_health") or {}
     if not snapshot:
         return {"headline": "No snapshot yet", "subtext": "Run the collectors to populate the dashboard."}
     fetched_at = snapshot.get("fetched_at", "unknown")
     power_text = f" · Power #{power_row.get('power_rank')}" if power_row else ""
     ai_rankings = view.get("ai_rankings") or {}
     ai_text = f" · AI {ai_rankings.get('confidence', {}).get('level', '').title()}" if ai_rankings else ""
+    health_text = f" · Health {str(dashboard_health.get('status') or 'unknown').title()}"
     return {
-        "headline": f"Team {snapshot.get('team_number')} - Rank #{snapshot.get('rank') or 'N/A'}{power_text}{ai_text}",
+        "headline": f"Team {snapshot.get('team_number')} - Rank #{snapshot.get('rank') or 'N/A'}{power_text}{ai_text}{health_text}",
         "subtext": f"Last official fetch: {fetched_at}",
     }
 
@@ -72,7 +74,7 @@ def view_context(active_tab: str, action_message: str = "") -> dict[str, object]
     settings = load_settings()
     with db_session(settings.db_path) as connection:
         init_db(connection)
-        view = build_dashboard_view(connection, settings.team_number)
+        view = build_dashboard_view(connection, settings.team_number, settings)
     view["settings"] = settings
     view["active_tab"] = active_tab
     view["nav_items"] = [

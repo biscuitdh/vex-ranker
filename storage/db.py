@@ -10,13 +10,37 @@ import math
 import sqlite3
 from pathlib import Path
 from typing import Any, Iterator
+import httpx
 
 from utils.analysis import build_ai_rankings, build_analysis
+from utils.service_control import inspect_managed_services
 
 
 def utc_now() -> str:
     """Return an ISO-8601 UTC timestamp."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def parse_timestamp(value: str | None) -> datetime | None:
+    """Parse an ISO-8601 timestamp into an aware UTC datetime when possible."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def age_minutes(value: str | None, *, now: datetime | None = None) -> float | None:
+    """Return the age of a timestamp in minutes."""
+    parsed = parse_timestamp(value)
+    if parsed is None:
+        return None
+    current = now or datetime.now(timezone.utc)
+    return round((current - parsed).total_seconds() / 60.0, 2)
 
 
 def to_json(value: Any) -> str:
@@ -248,6 +272,39 @@ def init_db(connection: sqlite3.Connection) -> None:
             confidence TEXT NOT NULL,
             headline TEXT NOT NULL,
             raw_json TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS healthcheck_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            reason_summary TEXT NOT NULL,
+            raw_json TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS repair_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            healthcheck_run_id INTEGER,
+            attempt_number INTEGER NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            error_summary TEXT NOT NULL,
+            raw_json TEXT NOT NULL,
+            FOREIGN KEY (healthcheck_run_id) REFERENCES healthcheck_runs(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS restart_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            healthcheck_run_id INTEGER,
+            requested_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            reason_summary TEXT NOT NULL,
+            targets_json TEXT NOT NULL,
+            raw_json TEXT NOT NULL,
+            FOREIGN KEY (healthcheck_run_id) REFERENCES healthcheck_runs(id) ON DELETE SET NULL
         );
         """
     )
@@ -610,6 +667,73 @@ def record_ai_rankings_snapshot(
     )
 
 
+def record_healthcheck_run(
+    connection: sqlite3.Connection,
+    *,
+    started_at: str,
+    completed_at: str,
+    status: str,
+    reason_summary: str,
+    payload: dict[str, Any],
+) -> int:
+    """Persist one self-heal health evaluation."""
+    cursor = connection.execute(
+        """
+        INSERT INTO healthcheck_runs (
+            started_at, completed_at, status, reason_summary, raw_json
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (started_at, completed_at, status, reason_summary, to_json(payload)),
+    )
+    return int(cursor.lastrowid)
+
+
+def record_repair_attempt(
+    connection: sqlite3.Connection,
+    *,
+    healthcheck_run_id: int | None,
+    attempt_number: int,
+    started_at: str,
+    completed_at: str,
+    status: str,
+    error_summary: str,
+    payload: dict[str, Any],
+) -> int:
+    """Persist one automated repair attempt."""
+    cursor = connection.execute(
+        """
+        INSERT INTO repair_attempts (
+            healthcheck_run_id, attempt_number, started_at, completed_at, status, error_summary, raw_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (healthcheck_run_id, attempt_number, started_at, completed_at, status, error_summary, to_json(payload)),
+    )
+    return int(cursor.lastrowid)
+
+
+def record_restart_event(
+    connection: sqlite3.Connection,
+    *,
+    healthcheck_run_id: int | None,
+    requested_at: str,
+    completed_at: str,
+    status: str,
+    reason_summary: str,
+    targets: list[str],
+    payload: dict[str, Any],
+) -> int:
+    """Persist one managed service restart event."""
+    cursor = connection.execute(
+        """
+        INSERT INTO restart_events (
+            healthcheck_run_id, requested_at, completed_at, status, reason_summary, targets_json, raw_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (healthcheck_run_id, requested_at, completed_at, status, reason_summary, to_json(targets), to_json(payload)),
+    )
+    return int(cursor.lastrowid)
+
+
 def get_latest_ai_rankings(connection: sqlite3.Connection, team_number: str = "7157B") -> dict[str, Any] | None:
     """Return the stored latest AI rankings snapshot for one team."""
     row = connection.execute(
@@ -624,6 +748,20 @@ def get_latest_ai_rankings(connection: sqlite3.Connection, team_number: str = "7
     if row is None or row["raw_json"] in (None, ""):
         return None
     return json.loads(str(row["raw_json"]))
+
+
+def get_latest_ai_rankings_generated_at(connection: sqlite3.Connection, team_number: str = "7157B") -> str | None:
+    """Return the latest generated timestamp for one team's AI rankings snapshot."""
+    row = connection.execute(
+        """
+        SELECT generated_at
+        FROM ai_rankings_snapshots
+        WHERE team_number = ?
+        LIMIT 1
+        """,
+        (team_number,),
+    ).fetchone()
+    return str(row["generated_at"]) if row and row["generated_at"] not in (None, "") else None
 
 
 def get_latest_snapshot(connection: sqlite3.Connection) -> dict[str, Any] | None:
@@ -1193,6 +1331,30 @@ def get_latest_collector_run(connection: sqlite3.Connection, collector_name: str
     return row_to_dict(row)
 
 
+def get_latest_healthcheck_run(connection: sqlite3.Connection) -> dict[str, Any] | None:
+    """Return the newest self-heal healthcheck record."""
+    row = connection.execute(
+        "SELECT * FROM healthcheck_runs ORDER BY completed_at DESC, id DESC LIMIT 1"
+    ).fetchone()
+    return row_to_dict(row)
+
+
+def get_latest_repair_attempt(connection: sqlite3.Connection) -> dict[str, Any] | None:
+    """Return the newest automated repair attempt."""
+    row = connection.execute(
+        "SELECT * FROM repair_attempts ORDER BY completed_at DESC, id DESC LIMIT 1"
+    ).fetchone()
+    return row_to_dict(row)
+
+
+def get_latest_restart_event(connection: sqlite3.Connection) -> dict[str, Any] | None:
+    """Return the newest managed service restart event."""
+    row = connection.execute(
+        "SELECT * FROM restart_events ORDER BY requested_at DESC, id DESC LIMIT 1"
+    ).fetchone()
+    return row_to_dict(row)
+
+
 def get_latest_rankings_collector_run(connection: sqlite3.Connection) -> dict[str, Any] | None:
     """Return the newest rankings-relevant collector run."""
     row = connection.execute(
@@ -1671,6 +1833,358 @@ def get_rankings_status(connection: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def _latest_run_health(
+    connection: sqlite3.Connection,
+    collector_name: str,
+    *,
+    stale_minutes: int,
+) -> dict[str, Any]:
+    """Return status information for one collector's latest run."""
+    latest_run = get_latest_collector_run(connection, collector_name)
+    latest_completed_at = latest_run.get("completed_at") if latest_run else ""
+    latest_success = bool(latest_run.get("success")) if latest_run else False
+    latest_age_minutes = age_minutes(latest_completed_at)
+    stale = latest_age_minutes is None or latest_age_minutes > stale_minutes
+    return {
+        "collector": collector_name,
+        "latest_run": latest_run,
+        "latest_completed_at": latest_completed_at,
+        "latest_success": latest_success,
+        "latest_age_minutes": latest_age_minutes,
+        "stale": stale,
+    }
+
+
+def _component_payload(
+    *,
+    name: str,
+    status: str,
+    summary: str,
+    checked_at: str,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return one normalized component-health payload."""
+    return {
+        "name": name,
+        "status": status,
+        "healthy": status == "healthy",
+        "severity": "failed" if status == "failed" else "degraded" if status == "degraded" else "healthy",
+        "summary": summary,
+        "checked_at": checked_at,
+        "details": details or {},
+    }
+
+
+def _data_pipeline_health(
+    connection: sqlite3.Connection,
+    settings: Any,
+    rankings_status: dict[str, Any],
+    latest_snapshot: dict[str, Any] | None,
+    ai_rankings: dict[str, Any] | None,
+    ai_generated_at: str | None,
+) -> tuple[dict[str, Any], dict[str, Any], list[str], list[str]]:
+    """Return data-pipeline health and shared freshness details."""
+    checked_at = utc_now()
+    rankings_snapshot_at = rankings_status.get("latest_rankings_snapshot_at") or ""
+    power_snapshot_at = rankings_status.get("latest_power_snapshot_at") or ""
+    source_updated_at = rankings_status.get("source_updated_at") or ""
+    latest_snapshot_at = latest_snapshot.get("fetched_at") if latest_snapshot else ""
+
+    freshness = {
+        "latest_snapshot_at": latest_snapshot_at,
+        "latest_snapshot_age_minutes": age_minutes(latest_snapshot_at),
+        "rankings_snapshot_at": rankings_snapshot_at,
+        "rankings_age_minutes": age_minutes(rankings_snapshot_at),
+        "power_snapshot_at": power_snapshot_at,
+        "source_updated_at": source_updated_at,
+        "source_age_minutes": age_minutes(source_updated_at),
+        "ai_generated_at": ai_generated_at,
+        "ai_age_minutes": age_minutes(ai_generated_at),
+    }
+    rankings_run = _latest_run_health(connection, "robotevents", stale_minutes=settings.dashboard_stale_minutes)
+    ai_run = _latest_run_health(connection, "ai_rankings", stale_minutes=settings.ai_rankings_stale_minutes)
+
+    reasons: list[str] = []
+    warnings: list[str] = []
+
+    has_rankings = bool(rankings_status.get("has_rankings"))
+    has_power = bool(rankings_status.get("has_power"))
+    has_ai = bool(ai_rankings)
+
+    if not has_rankings:
+        reasons.append("No rankings snapshot is stored yet.")
+    if freshness["rankings_age_minutes"] is None:
+        reasons.append("Rankings freshness timestamp is missing.")
+    elif freshness["rankings_age_minutes"] > settings.dashboard_stale_minutes:
+        reasons.append(f"Rankings snapshot is stale at {freshness['rankings_age_minutes']} minutes old.")
+    if freshness["latest_snapshot_age_minutes"] is None:
+        reasons.append("Focal-team dashboard snapshot is missing.")
+    elif freshness["latest_snapshot_age_minutes"] > settings.dashboard_stale_minutes:
+        reasons.append(f"Focal-team snapshot is stale at {freshness['latest_snapshot_age_minutes']} minutes old.")
+    if not has_power:
+        reasons.append("Derived power rankings are missing.")
+    if not rankings_run["latest_success"] and rankings_run["latest_run"]:
+        reasons.append(
+            f"Latest competition collector run failed: {rankings_run['latest_run'].get('error_summary') or 'unknown error'}"
+        )
+    if not has_ai:
+        reasons.append("AI rankings snapshot is missing.")
+    elif freshness["ai_age_minutes"] is None:
+        reasons.append("AI rankings freshness timestamp is missing.")
+    elif freshness["ai_age_minutes"] > settings.ai_rankings_stale_minutes:
+        reasons.append(f"AI rankings snapshot is stale at {freshness['ai_age_minutes']} minutes old.")
+    if not ai_run["latest_success"] and ai_run["latest_run"]:
+        reasons.append(
+            f"Latest AI rankings run failed: {ai_run['latest_run'].get('error_summary') or 'unknown error'}"
+        )
+    if freshness["source_age_minutes"] is not None and freshness["source_age_minutes"] > settings.dashboard_stale_minutes:
+        warnings.append(f"Underlying source update appears stale at {freshness['source_age_minutes']} minutes old.")
+    if rankings_status.get("empty_reason"):
+        warnings.append(str(rankings_status["empty_reason"]))
+
+    if reasons:
+        status = "failed"
+        summary = "; ".join(reasons[:4])
+    elif warnings:
+        status = "degraded"
+        summary = "; ".join(warnings[:3])
+    else:
+        status = "healthy"
+        summary = "Data pipeline freshness is within configured thresholds."
+
+    component = _component_payload(
+        name="data_pipeline",
+        status=status,
+        summary=summary,
+        checked_at=checked_at,
+        details={
+            "rankings_count": rankings_status.get("rankings_count", 0),
+            "power_count": rankings_status.get("power_count", 0),
+            "rankings_run": rankings_run,
+            "ai_run": ai_run,
+            "warnings": warnings,
+        },
+    )
+    return component, freshness, reasons, warnings
+
+
+def _gui_surface_health(settings: Any) -> dict[str, Any]:
+    """Return GUI reachability health."""
+    checked_at = utc_now()
+    url = f"http://{settings.gui_host}:{settings.gui_port}/"
+    timeout = min(max(int(settings.request_timeout_seconds), 1), 2)
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            response = client.get(url)
+        if response.status_code >= 400:
+            return _component_payload(
+                name="gui_surface",
+                status="failed",
+                summary=f"GUI probe failed with HTTP {response.status_code}.",
+                checked_at=checked_at,
+                details={"url": url, "status_code": response.status_code},
+            )
+        return _component_payload(
+            name="gui_surface",
+            status="healthy",
+            summary="GUI responded to the local health probe.",
+            checked_at=checked_at,
+            details={"url": url, "status_code": response.status_code},
+        )
+    except httpx.HTTPError as exc:
+        return _component_payload(
+            name="gui_surface",
+            status="failed",
+            summary=f"GUI probe failed: {exc}",
+            checked_at=checked_at,
+            details={"url": url, "error": str(exc)},
+        )
+
+
+def _published_surface_health(connection: sqlite3.Connection, settings: Any) -> dict[str, Any]:
+    """Return static-site and publish freshness health."""
+    checked_at = utc_now()
+    latest_json = Path(settings.static_site_dir) / "data" / "latest.json"
+    index_path = Path(settings.static_site_dir) / "index.html"
+    details: dict[str, Any] = {
+        "site_dir": str(settings.static_site_dir),
+        "latest_json": str(latest_json),
+        "index_path": str(index_path),
+    }
+    if not latest_json.exists() or not index_path.exists():
+        return _component_payload(
+            name="published_surface",
+            status="degraded",
+            summary="Static dashboard artifacts are missing.",
+            checked_at=checked_at,
+            details=details,
+        )
+
+    latest_generated_at = datetime.fromtimestamp(latest_json.stat().st_mtime, timezone.utc).isoformat()
+    age = age_minutes(latest_generated_at)
+    details["generated_at"] = latest_generated_at
+    details["age_minutes"] = age
+
+    issues: list[str] = []
+    if age is None or age > settings.dashboard_stale_minutes:
+        issues.append(f"Static dashboard artifacts are stale at {age} minutes old.")
+
+    publish_configured = bool(settings.git_push_enabled or settings.github_pages_repo)
+    latest_publish = get_latest_collector_run(connection, "publish_static")
+    details["publish_configured"] = publish_configured
+    details["latest_publish_run"] = latest_publish
+    if publish_configured:
+        if latest_publish is None:
+            issues.append("Static publish is configured but no publish run has been recorded yet.")
+        elif not bool(latest_publish.get("success")):
+            issues.append(f"Latest publish run failed: {latest_publish.get('error_summary') or 'unknown error'}")
+        else:
+            publish_age = age_minutes(str(latest_publish.get("completed_at") or ""))
+            details["publish_age_minutes"] = publish_age
+            if publish_age is None or publish_age > settings.dashboard_stale_minutes:
+                issues.append(f"Published snapshot appears stale at {publish_age} minutes since last publish.")
+
+    if issues:
+        return _component_payload(
+            name="published_surface",
+            status="degraded",
+            summary="; ".join(issues[:3]),
+            checked_at=checked_at,
+            details=details,
+        )
+    return _component_payload(
+        name="published_surface",
+        status="healthy",
+        summary="Static dashboard artifacts are fresh enough for match use.",
+        checked_at=checked_at,
+        details=details,
+    )
+
+
+def _notification_path_health(settings: Any) -> dict[str, Any]:
+    """Return Discord notification-path health."""
+    checked_at = utc_now()
+    details: dict[str, Any] = {}
+    if not settings.discord_webhook_url:
+        return _component_payload(
+            name="notification_path",
+            status="degraded",
+            summary="Discord webhook is not configured.",
+            checked_at=checked_at,
+            details=details,
+        )
+
+    timeout = min(max(int(settings.request_timeout_seconds), 1), 2)
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            response = client.get(settings.discord_webhook_url)
+        details["status_code"] = response.status_code
+        if response.status_code >= 400:
+            return _component_payload(
+                name="notification_path",
+                status="degraded",
+                summary=f"Discord webhook health probe returned HTTP {response.status_code}.",
+                checked_at=checked_at,
+                details=details,
+            )
+        return _component_payload(
+            name="notification_path",
+            status="healthy",
+            summary="Discord webhook responded to the health probe.",
+            checked_at=checked_at,
+            details=details,
+        )
+    except httpx.HTTPError as exc:
+        return _component_payload(
+            name="notification_path",
+            status="degraded",
+            summary=f"Discord webhook health probe failed: {exc}",
+            checked_at=checked_at,
+            details={"error": str(exc)},
+        )
+
+
+def _service_supervision_health(settings: Any) -> dict[str, Any]:
+    """Return LaunchAgent supervision health."""
+    checked_at = utc_now()
+    inspection = inspect_managed_services(settings, ["backend", "gui"])
+    status = "healthy" if inspection.get("status") == "healthy" else "failed"
+    summary = str(inspection.get("message") or "Managed-service inspection unavailable.")
+    if inspection.get("results"):
+        unhealthy = [item for item in inspection["results"] if item.get("status") != "healthy"]
+        if unhealthy:
+            summary = "; ".join(str(item.get("summary") or item.get("target")) for item in unhealthy[:2])
+    return _component_payload(
+        name="service_supervision",
+        status=status,
+        summary=summary,
+        checked_at=checked_at,
+        details=inspection,
+    )
+
+
+def evaluate_dashboard_health(connection: sqlite3.Connection, settings: Any) -> dict[str, Any]:
+    """Evaluate operator-facing dashboard health from freshness and collector telemetry."""
+    rankings_status = get_rankings_status(connection)
+    latest_snapshot = get_latest_snapshot(connection)
+    ai_rankings = get_latest_ai_rankings(connection, settings.team_number)
+    ai_generated_at = get_latest_ai_rankings_generated_at(connection, settings.team_number)
+    latest_healthcheck = get_latest_healthcheck_run(connection)
+    latest_repair_attempt = get_latest_repair_attempt(connection)
+    latest_restart_event = get_latest_restart_event(connection)
+
+    data_pipeline, freshness, data_reasons, data_warnings = _data_pipeline_health(
+        connection,
+        settings,
+        rankings_status,
+        latest_snapshot,
+        ai_rankings,
+        ai_generated_at,
+    )
+    gui_surface = _gui_surface_health(settings)
+    published_surface = _published_surface_health(connection, settings)
+    notification_path = _notification_path_health(settings)
+    service_supervision = _service_supervision_health(settings)
+    components = {
+        "data_pipeline": data_pipeline,
+        "gui_surface": gui_surface,
+        "published_surface": published_surface,
+        "notification_path": notification_path,
+        "service_supervision": service_supervision,
+    }
+
+    failed_components = [item for item in components.values() if item["status"] == "failed"]
+    degraded_components = [item for item in components.values() if item["status"] == "degraded"]
+    reasons = data_reasons + [item["summary"] for item in failed_components if item["name"] != "data_pipeline"]
+    warnings = data_warnings + [item["summary"] for item in degraded_components if item["name"] not in {"data_pipeline"}]
+
+    if failed_components:
+        status = "failed"
+    elif degraded_components:
+        status = "degraded"
+    else:
+        status = "healthy"
+
+    return {
+        "status": status,
+        "healthy": status == "healthy",
+        "reason_summary": "; ".join((reasons or warnings)[:4]) if (reasons or warnings) else "Dashboard health is within configured thresholds.",
+        "reasons": reasons,
+        "warnings": warnings,
+        "thresholds": {
+            "dashboard_stale_minutes": settings.dashboard_stale_minutes,
+            "ai_rankings_stale_minutes": settings.ai_rankings_stale_minutes,
+            "restart_cooldown_minutes": settings.restart_cooldown_minutes,
+            "max_auto_repair_attempts": settings.max_auto_repair_attempts,
+        },
+        "freshness": freshness,
+        "components": components,
+        "last_healthcheck": latest_healthcheck,
+        "last_repair_attempt": latest_repair_attempt,
+        "last_restart_event": latest_restart_event,
+    }
+
+
 def compute_rank_delta(latest: dict[str, Any] | None, previous: dict[str, Any] | None) -> dict[str, Any]:
     """Compute the latest official rank and record deltas."""
     rank_change: int | None = None
@@ -1923,8 +2437,32 @@ def compute_and_store_derived_metrics(
     return metrics
 
 
-def build_dashboard_view(connection: sqlite3.Connection, team_number: str = "7157B") -> dict[str, Any]:
+def _hydrate_telemetry_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Attach decoded raw payload to a telemetry row when present."""
+    if row is None:
+        return None
+    hydrated = dict(row)
+    raw_value = hydrated.get("raw_json")
+    if raw_value not in (None, ""):
+        try:
+            hydrated["payload"] = json.loads(str(raw_value))
+        except json.JSONDecodeError:
+            hydrated["payload"] = {}
+    else:
+        hydrated["payload"] = {}
+    return hydrated
+
+
+def build_dashboard_view(
+    connection: sqlite3.Connection,
+    team_number: str = "7157B",
+    settings: Any | None = None,
+) -> dict[str, Any]:
     """Collect the current database state for reporting and the GUI."""
+    if settings is None:
+        from config import load_settings
+
+        settings = load_settings(env_file=None)
     latest = get_latest_snapshot(connection)
     previous = get_previous_snapshot(connection)
     recent_completed = get_recent_matches(connection, status="completed", limit=10)
@@ -1949,6 +2487,10 @@ def build_dashboard_view(connection: sqlite3.Connection, team_number: str = "715
     upcoming_matchups = get_upcoming_matchups(connection, team_number, limit=5)
     matchup_summary = _build_matchup_summary(upcoming_matchups)
     rankings_status = get_rankings_status(connection)
+    dashboard_health = evaluate_dashboard_health(connection, settings)
+    last_healthcheck = _hydrate_telemetry_row(get_latest_healthcheck_run(connection))
+    last_repair_attempt = _hydrate_telemetry_row(get_latest_repair_attempt(connection))
+    last_restart_event = _hydrate_telemetry_row(get_latest_restart_event(connection))
     base_view = {
         "latest_snapshot": latest,
         "previous_snapshot": previous,
@@ -1974,6 +2516,10 @@ def build_dashboard_view(connection: sqlite3.Connection, team_number: str = "715
         "upcoming_matchups": upcoming_matchups,
         "matchup_summary": matchup_summary,
         "rankings_status": rankings_status,
+        "dashboard_health": dashboard_health,
+        "last_healthcheck": last_healthcheck,
+        "last_repair_attempt": last_repair_attempt,
+        "last_restart_event": last_restart_event,
     }
     analysis = build_analysis(base_view)
     base_view["analysis"] = analysis

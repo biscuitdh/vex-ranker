@@ -6,6 +6,111 @@
   {% set power = team_power %}
   {% set rankings = rankings_status if rankings_status is defined else {"rankings_count": 0} %}
   {% set analysis_view = analysis if analysis is defined else {"headline": "", "cards": []} %}
+  {% set health = dashboard_health if dashboard_health is defined else {"status": "unknown", "freshness": {}} %}
+  {% if static_site %}
+    {% call ui.page_intro("Public Snapshot", "7157B Match Day View", "A simple public snapshot focused on what matters most right now: the AI read and the next known matches.") %}
+      <a class="header-action" href="ai-rankings/">Open AI Rankings</a>
+      <a class="header-action" href="matches/">Open Matches</a>
+      {% if settings.livestream_url %}
+        <a class="header-action" href="{{ settings.livestream_url }}" target="_blank" rel="noopener noreferrer">Open Livestream</a>
+      {% endif %}
+    {% endcall %}
+
+    {{ ui.metric_grid([
+      {"label": "Official Rank", "value": snapshot.rank if snapshot else "N/A"},
+      {"label": "Power Rank", "value": power.power_rank if power else "N/A"},
+      {"label": "Record", "value": snapshot.record_text if snapshot else "Unknown"},
+      {"label": "Next Match", "value": match_intelligence.next_match.round_label if match_intelligence and match_intelligence.next_match else "Unknown"},
+      {"label": "Next Field", "value": match_intelligence.next_match.field_name if match_intelligence and match_intelligence.next_match and match_intelligence.next_match.field_name else "TBD"},
+      {"label": "Next Time", "value": match_intelligence.next_match.scheduled_time if match_intelligence and match_intelligence.next_match and match_intelligence.next_match.scheduled_time else "TBD"},
+    ]) }}
+
+    <div class="split">
+      <section class="surface-stack">
+        <div class="summary-card">
+          {{ ui.section_header("AI Rankings", "Current Read", "The compact ranking brief for viewers who do not need the whole operator console.") }}
+          {% if ai_rankings %}
+            <div class="muted-panel">{{ ai_rankings.headline }}</div>
+            <div class="muted-panel" style="margin-top: 12px;">{{ ai_rankings.why_it_matters }}</div>
+            {% if ai_rankings.priority_factors %}
+              <table style="margin-top: 12px;">
+                <thead>
+                  <tr><th>Priority</th><th>What Matters</th></tr>
+                </thead>
+                <tbody>
+                  {% for item in ai_rankings.priority_factors[:4] %}
+                    <tr><td>{{ loop.index }}</td><td>{{ item }}</td></tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            {% endif %}
+          {% else %}
+            <div class="muted-panel">No AI rankings snapshot is available yet.</div>
+          {% endif %}
+        </div>
+
+        <div class="summary-card">
+          {{ ui.section_header("Recent Impact", "Latest Result", "The most recent completed match and its likely standing impact.") }}
+          {% if match_intelligence.last_match %}
+            <div class="muted-panel">
+              <strong>{{ match_intelligence.last_match.round_label or match_intelligence.last_match.match_key }}</strong>
+              ended
+              <strong>{{ match_intelligence.last_match.score_for or "?" }}-{{ match_intelligence.last_match.score_against or "?" }}</strong>
+              against
+              <strong>{{ ", ".join(match_intelligence.last_match.opponent_teams) if match_intelligence.last_match.opponent_teams else match_intelligence.last_match.opponent or "TBD" }}</strong>.
+            </div>
+          {% else %}
+            <div class="muted-panel">No completed match is stored yet.</div>
+          {% endif %}
+        </div>
+      </section>
+
+      <section class="surface-stack">
+        <div class="summary-card">
+          {{ ui.section_header("Next Match", "Upcoming Focus", "The next known match with the fast context a parent, coach, or teammate actually wants.") }}
+          {% if match_intelligence.next_match %}
+            <table>
+              <tbody>
+                <tr><th>Match</th><td>{{ match_intelligence.next_match.round_label or match_intelligence.next_match.match_key }}</td></tr>
+                <tr><th>Time</th><td>{{ match_intelligence.next_match.scheduled_time or "TBD" }}</td></tr>
+                <tr><th>Location</th><td>{{ match_intelligence.next_match.field_name or "TBD" }}</td></tr>
+                <tr><th>Partners</th><td>{{ ", ".join(match_intelligence.next_match.partner_teams) if match_intelligence.next_match.partner_teams else "TBD" }}</td></tr>
+                <tr><th>Opponents</th><td>{{ ", ".join(match_intelligence.next_match.opponent_teams) if match_intelligence.next_match.opponent_teams else match_intelligence.next_match.opponent or "TBD" }}</td></tr>
+                <tr><th>Avg Opponent Rank</th><td>{{ match_intelligence.next_match.opponent_average_official_rank if match_intelligence.next_match.opponent_average_official_rank is not none else "N/A" }}</td></tr>
+                <tr><th>Avg Opponent Power</th><td>{{ match_intelligence.next_match.opponent_average_power_rank if match_intelligence.next_match.opponent_average_power_rank is not none else "N/A" }}</td></tr>
+              </tbody>
+            </table>
+            <div class="muted-panel" style="margin-top: 12px;">{{ match_intelligence.next_match.matchup_call or "No matchup call available yet." }}</div>
+          {% else %}
+            <div class="muted-panel">No next match is available from the current local source.</div>
+          {% endif %}
+        </div>
+
+        <div class="summary-card">
+          {{ ui.section_header("Slate", "Next Known Matches", "The next few match slots without the extra dashboard clutter.") }}
+          {% if upcoming_matchups %}
+            <table>
+              <thead>
+                <tr><th>Match</th><th>Time</th><th>Field</th><th>Opponents</th></tr>
+              </thead>
+              <tbody>
+                {% for item in upcoming_matchups[:5] %}
+                  <tr>
+                    <td>{{ item.round_label or item.match_key }}</td>
+                    <td>{{ item.scheduled_time or "TBD" }}</td>
+                    <td>{{ item.field_name or "TBD" }}</td>
+                    <td>{{ ", ".join(item.opponent_teams) if item.opponent_teams else item.opponent or "TBD" }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          {% else %}
+            <div class="muted-panel">No upcoming 7157B match slate is available right now.</div>
+          {% endif %}
+        </div>
+      </section>
+    </div>
+  {% else %}
   {% call ui.page_intro("Overview", "Current Team Status", "Official team status stays front and center, with division-wide context available in Rankings.") %}
     <a class="header-action" href="{{ '/rankings' if not static_site else 'rankings/' }}">Open Rankings</a>
     <a class="header-action" href="{{ '/ai-rankings' if not static_site else 'ai-rankings/' }}">Open AI Rankings</a>
@@ -16,15 +121,55 @@
   {{ ui.metric_grid([
     {"label": "Official Rank", "value": snapshot.rank if snapshot else "N/A"},
     {"label": "Power Rank", "value": power.power_rank if power else "N/A"},
+    {"label": "Health", "value": health.status|title},
     {"label": "Record", "value": snapshot.record_text if snapshot else "Unknown"},
     {"label": "Skills Total", "value": team_skill.total_score if team_skill else "N/A"},
     {"label": "Rankings Loaded", "value": rankings.rankings_count},
     {"label": "Source", "value": rankings.snapshot_source or "Unknown"},
     {"label": "Source Updated", "value": rankings.source_updated_at or "Unknown"},
+    {"label": "AI Generated", "value": health.freshness.ai_generated_at if health.freshness and health.freshness.ai_generated_at else "Unknown"},
   ]) }}
 
   <div class="split">
     <section class="surface-stack">
+      <div class="summary-card">
+        {{ ui.section_header("Automation", "Self-Heal Status", "Hourly health checks, repair attempts, and restart escalation. Less mysticism, more telemetry.") }}
+        <div class="muted-panel">
+          <span class="badge health-{{ health.status or 'unknown' }}">{{ (health.status or "unknown")|title }}</span>
+          {% if health.reason_summary %}
+            <div style="margin-top: 10px;">{{ health.reason_summary }}</div>
+          {% endif %}
+          {% if health.reasons %}
+            <div class="small" style="margin-top: 10px;">Reasons: {{ "; ".join(health.reasons[:4]) }}</div>
+          {% endif %}
+        </div>
+        <table class="list-table" style="margin-top: 12px;">
+          <tbody>
+            <tr><th>Last Health Check</th><td>{{ last_healthcheck.completed_at if last_healthcheck else "Unknown" }}</td></tr>
+            <tr><th>Last Repair</th><td>{{ last_repair_attempt.completed_at if last_repair_attempt else "Never" }}</td></tr>
+            <tr><th>Last Restart</th><td>{{ last_restart_event.requested_at if last_restart_event else "Never" }}</td></tr>
+            <tr><th>Latest Snapshot Age</th><td>{{ health.freshness.latest_snapshot_age_minutes if health.freshness and health.freshness.latest_snapshot_age_minutes is not none else "Unknown" }} min</td></tr>
+            <tr><th>AI Snapshot Age</th><td>{{ health.freshness.ai_age_minutes if health.freshness and health.freshness.ai_age_minutes is not none else "Unknown" }} min</td></tr>
+          </tbody>
+        </table>
+        {% if health.components %}
+          <table class="list-table" style="margin-top: 12px;">
+            <thead>
+              <tr><th>Surface</th><th>Status</th><th>Summary</th></tr>
+            </thead>
+            <tbody>
+              {% for name, component in health.components.items() %}
+                <tr>
+                  <td>{{ name.replace("_", " ")|title }}</td>
+                  <td><span class="badge health-{{ component.status or 'unknown' }}">{{ (component.status or "unknown")|title }}</span></td>
+                  <td>{{ component.summary }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% endif %}
+      </div>
+
       <div class="summary-card">
         {{ ui.section_header("Analysis", "AI-Style Summary", "Automated commentary based on the data we actually have, not the data we wish RobotEvents would hand over.") }}
         <div class="muted-panel">{{ analysis_view.headline or "No analysis available yet." }}</div>
@@ -265,4 +410,5 @@
       </div>
     </section>
   </div>
+  {% endif %}
 {% endblock %}

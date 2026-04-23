@@ -65,6 +65,18 @@ One-shot competition only:
 python main.py --once --collector robotevents
 ```
 
+One-shot dashboard health check:
+
+```bash
+python main.py --once --collector healthcheck
+```
+
+One-shot self-heal cycle:
+
+```bash
+python main.py --once --collector self_heal
+```
+
 Scheduler mode:
 
 ```bash
@@ -147,37 +159,37 @@ That split keeps generated artifacts out of the working codebase and makes rollb
 
 ## Hourly Mac Updates
 
-The repo now includes a sample LaunchAgent plist at:
+The repo now includes sample LaunchAgent plists for both long-running services:
 
-`ops/com.vexranker.publish.plist.example`
-
-There is also a wrapper script at:
-
-`scripts/publish_pages.sh`
+`ops/com.vexranker.monitor.plist.example`
+`ops/com.vexranker.gui.plist.example`
 
 Recommended flow:
 
-1. copy it to `~/Library/LaunchAgents/com.vexranker.publish.plist`
+1. copy them to:
+   `~/Library/LaunchAgents/com.vexranker.monitor.plist`
+   `~/Library/LaunchAgents/com.vexranker.gui.plist`
 2. replace the placeholder paths with your real project paths
-3. load it with:
+3. load them with:
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.vexranker.publish.plist
+launchctl load ~/Library/LaunchAgents/com.vexranker.monitor.plist
+launchctl load ~/Library/LaunchAgents/com.vexranker.gui.plist
 ```
 
-That runs:
+The monitor agent runs:
 
 ```bash
-/path/to/.venv/bin/python /path/to/main.py --publish-static
+/path/to/.venv/bin/python /path/to/main.py
 ```
 
-or you can point LaunchAgent at:
+The GUI agent runs:
 
 ```bash
-/path/to/scripts/publish_pages.sh
+/path/to/.venv/bin/python /path/to/gui_app.py
 ```
 
-every hour and also at load.
+The internal self-heal loop checks freshness every `HEALTHCHECK_INTERVAL_MINUTES`, retries repairs automatically, and can kick both LaunchAgents through `launchctl kickstart -k` when the dashboard stays unhealthy.
 
 ## Optional Social Adapters
 
