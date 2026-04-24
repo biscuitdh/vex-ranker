@@ -17,10 +17,12 @@ from collectors.vexvia_local import VexViaLocalCollector
 import gui_app
 import main
 from notify.discord import confidence_allowed
+from notify import discord_bridge
 from reporters.json_export import render_json_export
 from reporters.markdown import render_markdown_report
 from reporters.static_site import export_static_site, publish_to_git_repo
 from storage import db
+from storage.manual_notes_seed import infer_comment_tags
 from utils.analysis import build_ai_rankings
 
 
@@ -37,8 +39,12 @@ class SettingsTests(unittest.TestCase):
                 self.assertTrue(settings.enable_vexvia_local)
                 self.assertTrue(settings.enable_auto_heal)
                 self.assertTrue(settings.enable_service_restart)
+                self.assertEqual(settings.discord_reply_timeout_minutes, 20)
+                self.assertEqual(settings.discord_approval_prefix, "approve")
+                self.assertFalse(settings.discord_text_fallback_enabled)
                 self.assertEqual(settings.healthcheck_interval_minutes, 60)
                 self.assertAlmostEqual(settings.power_rank_weight_official, 0.35)
+                self.assertAlmostEqual(settings.power_rank_weight_manual, 0.12)
                 self.assertTrue(settings.data_dir.exists())
 
 
@@ -367,6 +373,311 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(view["alliance_impact"]["partner_rows"][0]["team_number"], "5555C")
         self.assertTrue(view["alliance_impact"]["opponent_rows"])
         self.assertIn("swing_matches", view)
+
+    def test_manual_team_notes_seed_and_tag_inference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "monitor.db"
+            with db.db_session(db_path) as connection:
+                db.init_db(connection)
+                note = db.get_manual_team_note(connection, "3150V")
+                all_notes = db.get_manual_team_notes(connection)
+        self.assertIsNotNone(note)
+        assert note is not None
+        self.assertEqual(note["source_label"], "coach_sheet_2026_04_23")
+        self.assertIn("won_states", note["comment_tags"])
+        self.assertGreaterEqual(len(all_notes), 10)
+        self.assertIn("innovate_pr_nats", infer_comment_tags("Innovate @ PR Nats"))
+        self.assertEqual(infer_comment_tags("with them by"), [])
+
+    def test_manual_notes_influence_power_rank_but_not_official_rank(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "monitor.db"
+            with db.db_session(db_path) as connection:
+                db.init_db(connection)
+                snapshot = {
+                    "event_sku": "RE",
+                    "event_name": "Worlds",
+                    "division_name": "Technology",
+                    "team_number": "3150V",
+                    "team_name": "Manual Favorite",
+                    "school_name": "Ontario",
+                    "rank": 2,
+                    "wins": 4,
+                    "losses": 2,
+                    "ties": 0,
+                    "wp": 8,
+                    "ap": 20,
+                    "sp": 28,
+                    "average_score": 35,
+                    "record_text": "4-2-0",
+                    "source": "api",
+                    "fetched_at": "2026-04-21T12:00:00+00:00",
+                }
+                db.record_competition_snapshot(connection, snapshot)
+                db.record_division_rankings(
+                    connection,
+                    "2026-04-21T12:00:00+00:00",
+                    [
+                        {
+                            "event_sku": "RE",
+                            "division_name": "Technology",
+                            "team_number": "19026",
+                            "team_name": "Top Official",
+                            "organization": "California",
+                            "rank": 1,
+                            "wins": 5,
+                            "losses": 1,
+                            "ties": 0,
+                            "wp": 10,
+                            "ap": 22,
+                            "sp": 30,
+                            "average_score": 37,
+                            "record_text": "5-1-0",
+                        },
+                        {
+                            "event_sku": "RE",
+                            "division_name": "Technology",
+                            "team_number": "3150V",
+                            "team_name": "Manual Favorite",
+                            "organization": "Ontario",
+                            "rank": 2,
+                            "wins": 4,
+                            "losses": 2,
+                            "ties": 0,
+                            "wp": 8,
+                            "ap": 20,
+                            "sp": 28,
+                            "average_score": 35,
+                            "record_text": "4-2-0",
+                        },
+                        {
+                            "event_sku": "RE",
+                            "division_name": "Technology",
+                            "team_number": "9999X",
+                            "team_name": "No Note",
+                            "organization": "Elsewhere",
+                            "rank": 3,
+                            "wins": 3,
+                            "losses": 3,
+                            "ties": 0,
+                            "wp": 6,
+                            "ap": 18,
+                            "sp": 24,
+                            "average_score": 31,
+                            "record_text": "3-3-0",
+                        },
+                    ],
+                )
+                db.record_skills_snapshot(
+                    connection,
+                    "2026-04-21T12:00:00+00:00",
+                    [
+                        {
+                            "event_sku": "RE",
+                            "division_name": "Technology",
+                            "team_number": "19026",
+                            "team_name": "Top Official",
+                            "driver_score": 40,
+                            "programming_score": 20,
+                            "total_score": 60,
+                            "source": "api",
+                        },
+                        {
+                            "event_sku": "RE",
+                            "division_name": "Technology",
+                            "team_number": "3150V",
+                            "team_name": "Manual Favorite",
+                            "driver_score": 42,
+                            "programming_score": 23,
+                            "total_score": 65,
+                            "source": "api",
+                        },
+                        {
+                            "event_sku": "RE",
+                            "division_name": "Technology",
+                            "team_number": "9999X",
+                            "team_name": "No Note",
+                            "driver_score": 35,
+                            "programming_score": 15,
+                            "total_score": 50,
+                            "source": "api",
+                        },
+                    ],
+                )
+                baseline = db.compute_and_store_derived_metrics(
+                    connection,
+                    snapshot_at="2026-04-21T12:00:00+00:00",
+                    event_sku="RE",
+                    division_name="Technology",
+                    recent_match_count=5,
+                    weights={
+                        "official": 0.35,
+                        "opr": 0.20,
+                        "dpr": 0.10,
+                        "ccwm": 0.15,
+                        "skills": 0.10,
+                        "form": 0.10,
+                        "manual": 0.0,
+                    },
+                )
+                with_manual = db.compute_and_store_derived_metrics(
+                    connection,
+                    snapshot_at="2026-04-21T12:00:00+00:00",
+                    event_sku="RE",
+                    division_name="Technology",
+                    recent_match_count=5,
+                    weights={
+                        "official": 0.35,
+                        "opr": 0.20,
+                        "dpr": 0.10,
+                        "ccwm": 0.15,
+                        "skills": 0.10,
+                        "form": 0.10,
+                        "manual": 0.12,
+                    },
+                )
+                view = db.build_dashboard_view(connection, "3150V")
+        baseline_map = {item["team_number"]: item for item in baseline}
+        with_manual_map = {item["team_number"]: item for item in with_manual}
+        self.assertEqual(view["division_rankings"][0]["team_number"], "19026")
+        self.assertEqual(view["team_power"]["team_number"], "3150V")
+        self.assertGreater(view["team_power"]["manual_scout_score"], 0.0)
+        self.assertAlmostEqual(view["team_power"]["manual_scout_weight"], 0.12)
+        self.assertIn("won_states", view["team_power"]["manual_note_summary"])
+        self.assertEqual(view["team_manual_note"]["team_number"], "3150V")
+        self.assertGreater(
+            with_manual_map["3150V"]["composite_score"],
+            baseline_map["3150V"]["composite_score"],
+        )
+        self.assertLess(
+            with_manual_map["19026"]["composite_score"],
+            baseline_map["19026"]["composite_score"],
+        )
+
+    def test_snapshot_and_match_queries_are_team_specific(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "monitor.db"
+            with db.db_session(db_path) as connection:
+                db.init_db(connection)
+                db.record_division_rankings(
+                    connection,
+                    "2026-04-21T12:00:00+00:00",
+                    [
+                        {
+                            "event_sku": "RE",
+                            "division_name": "Technology",
+                            "team_number": "7157B",
+                            "team_name": "Mystery Machine",
+                            "organization": "Chittenango",
+                            "rank": 10,
+                            "wins": 2,
+                            "losses": 0,
+                            "ties": 0,
+                            "wp": 4,
+                            "ap": 8,
+                            "sp": 40,
+                            "average_score": 25,
+                            "record_text": "2-0-0",
+                            "source": "vex_via_local",
+                        },
+                        {
+                            "event_sku": "RE",
+                            "division_name": "Technology",
+                            "team_number": "3150V",
+                            "team_name": "Voltage",
+                            "organization": "Ranger",
+                            "rank": 20,
+                            "wins": 1,
+                            "losses": 1,
+                            "ties": 0,
+                            "wp": 2,
+                            "ap": 5,
+                            "sp": 30,
+                            "average_score": 20,
+                            "record_text": "1-1-0",
+                            "source": "vex_via_local",
+                        },
+                    ],
+                )
+                db.record_division_rankings(
+                    connection,
+                    "2026-04-21T12:10:00+00:00",
+                    [
+                        {
+                            "event_sku": "RE",
+                            "division_name": "Technology",
+                            "team_number": "7157B",
+                            "team_name": "Mystery Machine",
+                            "organization": "Chittenango",
+                            "rank": 8,
+                            "wins": 3,
+                            "losses": 0,
+                            "ties": 0,
+                            "wp": 6,
+                            "ap": 9,
+                            "sp": 44,
+                            "average_score": 27,
+                            "record_text": "3-0-0",
+                            "source": "vex_via_local",
+                        },
+                        {
+                            "event_sku": "RE",
+                            "division_name": "Technology",
+                            "team_number": "3150V",
+                            "team_name": "Voltage",
+                            "organization": "Ranger",
+                            "rank": 18,
+                            "wins": 2,
+                            "losses": 1,
+                            "ties": 0,
+                            "wp": 4,
+                            "ap": 7,
+                            "sp": 32,
+                            "average_score": 21,
+                            "record_text": "2-1-0",
+                            "source": "vex_via_local",
+                        },
+                    ],
+                )
+                db.upsert_matches(
+                    connection,
+                    [
+                        {
+                            "match_key": "Q10-7157B",
+                            "event_sku": "RE",
+                            "division_name": "Technology",
+                            "team_number": "7157B",
+                            "match_type": "qualification",
+                            "round_label": "Q10",
+                            "status": "scheduled",
+                            "scheduled_time": "2099-04-21T09:45:00+00:00",
+                            "alliance": "red",
+                            "opponent": "1234A, 9999X",
+                            "raw_json": {"source": "observed_vex_via"},
+                        },
+                        {
+                            "match_key": "Q11-3150V",
+                            "event_sku": "RE",
+                            "division_name": "Technology",
+                            "team_number": "3150V",
+                            "match_type": "qualification",
+                            "round_label": "Q11",
+                            "status": "scheduled",
+                            "scheduled_time": "2099-04-21T10:00:00+00:00",
+                            "alliance": "blue",
+                            "opponent": "19026, 7777C",
+                            "raw_json": {"source": "observed_vex_via"},
+                        },
+                    ],
+                )
+                latest_3150v = db.get_latest_snapshot(connection, "3150V")
+                previous_3150v = db.get_previous_snapshot(connection, "3150V")
+                matches_7157b = db.get_recent_matches(connection, team_number="7157B", status="scheduled")
+            self.assertEqual(latest_3150v["team_number"], "3150V")
+            self.assertEqual(latest_3150v["rank"], 18)
+            self.assertEqual(previous_3150v["rank"], 20)
+            self.assertEqual(len(matches_7157b), 1)
+            self.assertEqual(matches_7157b[0]["team_number"], "7157B")
 
     def test_ai_rankings_snapshot_overwrites_cleanly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -863,6 +1174,83 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(captured["status"], "302 Found")
         self.assertTrue(any(header[0] == "Location" and "AI+rankings+refresh+completed:+high" in header[1] for header in captured["headers"]))
 
+    def test_team_query_renders_requested_team(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict("os.environ", {"BASE_DIR": tmp}, clear=True):
+                settings = config.load_settings(env_file=None)
+                with db.db_session(settings.db_path) as connection:
+                    db.init_db(connection)
+                    db.record_division_rankings(
+                        connection,
+                        "2026-04-21T12:00:00+00:00",
+                        [
+                            {
+                                "event_sku": "RE",
+                                "division_name": "Technology",
+                                "team_number": "7157B",
+                                "team_name": "Mystery Machine",
+                                "organization": "Chittenango",
+                                "rank": 10,
+                                "wins": 2,
+                                "losses": 0,
+                                "ties": 0,
+                                "wp": 4,
+                                "ap": 8,
+                                "sp": 40,
+                                "average_score": 25,
+                                "record_text": "2-0-0",
+                            },
+                            {
+                                "event_sku": "RE",
+                                "division_name": "Technology",
+                                "team_number": "3150V",
+                                "team_name": "Voltage",
+                                "organization": "Ranger",
+                                "rank": 20,
+                                "wins": 1,
+                                "losses": 1,
+                                "ties": 0,
+                                "wp": 2,
+                                "ap": 5,
+                                "sp": 30,
+                                "average_score": 20,
+                                "record_text": "1-1-0",
+                            },
+                        ],
+                    )
+                    db.record_ai_rankings_snapshot(
+                        connection,
+                        "3150V",
+                        {
+                            "generated_at": "2026-04-21T12:05:00+00:00",
+                            "source_snapshot_at": "2026-04-21T12:00:00+00:00",
+                            "source_type": "vex_via_local",
+                            "confidence": {"level": "high", "body": "Fresh local standings available."},
+                            "headline": "3150V sits at official rank #20 with high confidence.",
+                            "why_it_matters": "Testing.",
+                            "official_rank": 20,
+                            "power_rank": None,
+                            "skills_total": None,
+                            "summary_blocks": [],
+                            "priority_factors": [],
+                            "threat_rows": [],
+                            "swing_rows": [],
+                            "alliance": {},
+                            "top_movers": [],
+                            "trend": {},
+                        },
+                    )
+                app = gui_app.create_app()
+                captured: dict[str, object] = {}
+
+                def start_response(status, headers):
+                    captured["status"] = status
+                    captured["headers"] = headers
+
+                dashboard_body = b"".join(app({"REQUEST_METHOD": "GET", "PATH_INFO": "/", "QUERY_STRING": "team=3150V"}, start_response))
+        self.assertEqual(captured["status"], "200 OK")
+        self.assertIn(b"Team 3150V Monitoring Console", dashboard_body)
+
 
 class AIRankingsTests(unittest.TestCase):
     """AI rankings synthesis tests."""
@@ -994,6 +1382,31 @@ def _seed_healthy_dashboard_state(connection: sqlite3.Connection) -> None:
 class DashboardHealthTests(unittest.TestCase):
     """Health evaluation and self-heal tests."""
 
+    def _insert_previous_snapshot(self, connection: sqlite3.Connection) -> None:
+        """Insert an older focal-team snapshot so record-change comparisons have history."""
+        db.record_competition_snapshot(
+            connection,
+            {
+                "event_sku": "RE",
+                "event_name": "Worlds",
+                "division_name": "Technology",
+                "team_number": "7157B",
+                "team_name": "Mystery Machine",
+                "school_name": "Chittenango",
+                "rank": 4,
+                "wins": 2,
+                "losses": 0,
+                "ties": 0,
+                "wp": 4,
+                "ap": 6,
+                "sp": 22,
+                "average_score": 30,
+                "record_text": "2-0-0",
+                "source": "vex_via_local",
+                "fetched_at": "2026-04-22T11:50:00+00:00",
+            },
+        )
+
     def test_evaluate_dashboard_health_reports_healthy_view(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(
@@ -1020,6 +1433,7 @@ class DashboardHealthTests(unittest.TestCase):
                 self.assertEqual(health["status"], "healthy")
                 self.assertTrue(health["healthy"])
                 self.assertEqual(health["components"]["gui_surface"]["status"], "healthy")
+                self.assertEqual(health["components"]["match_progress"]["status"], "healthy")
 
     def test_evaluate_dashboard_health_reports_gui_failure_and_publish_degrade(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1046,6 +1460,209 @@ class DashboardHealthTests(unittest.TestCase):
                         health = db.evaluate_dashboard_health(connection, settings)
                 self.assertEqual(health["status"], "failed")
                 self.assertIn("GUI unreachable", health["reason_summary"])
+
+    def test_match_progress_healthy_when_record_changes_and_next_match_advances(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                "os.environ",
+                {
+                    "BASE_DIR": tmp,
+                    "TIMEZONE": "UTC",
+                    "DASHBOARD_STALE_MINUTES": "5000000",
+                    "AI_RANKINGS_STALE_MINUTES": "5000000",
+                },
+                clear=True,
+            ):
+                settings = config.load_settings(env_file=None)
+                with db.db_session(settings.db_path) as connection:
+                    db.init_db(connection)
+                    _seed_healthy_dashboard_state(connection)
+                    self._insert_previous_snapshot(connection)
+                    previous_health = {
+                        "freshness": {
+                            "current_next_match": {"match_key": "Q12", "round_label": "Q12", "scheduled_time": "2026-04-22T12:30:00+00:00"},
+                        }
+                    }
+                    db.record_healthcheck_run(
+                        connection,
+                        started_at=db.utc_now(),
+                        completed_at=db.utc_now(),
+                        status="healthy",
+                        reason_summary="previous",
+                        payload=previous_health,
+                    )
+                    connection.execute(
+                        """
+                        UPDATE competition_snapshots
+                        SET record_text = ?, fetched_at = ?
+                        WHERE team_number = ? AND fetched_at = ?
+                        """,
+                        ("3-1-0", "2026-04-22T12:08:00+00:00", "7157B", "2026-04-22T12:00:00+00:00"),
+                    )
+                    with (
+                        patch("storage.db.get_match_intelligence", return_value={"next_match": {"match_key": "Q13", "round_label": "Q13", "scheduled_time": "2026-04-22T12:45:00+00:00"}, "last_match": {}}),
+                        patch("storage.db._gui_surface_health", return_value={"name": "gui_surface", "status": "healthy", "summary": "GUI healthy."}),
+                        patch("storage.db._published_surface_health", return_value={"name": "published_surface", "status": "healthy", "summary": "Published healthy."}),
+                        patch("storage.db._notification_path_health", return_value={"name": "notification_path", "status": "healthy", "summary": "Discord healthy."}),
+                        patch("storage.db._service_supervision_health", return_value={"name": "service_supervision", "status": "healthy", "summary": "Services healthy."}),
+                    ):
+                        health = db.evaluate_dashboard_health(connection, settings)
+                self.assertEqual(health["components"]["match_progress"]["status"], "healthy")
+
+    def test_match_progress_degraded_inside_grace_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                "os.environ",
+                {
+                    "BASE_DIR": tmp,
+                    "TIMEZONE": "UTC",
+                    "DASHBOARD_STALE_MINUTES": "5000000",
+                    "AI_RANKINGS_STALE_MINUTES": "5000000",
+                    "MATCH_PROGRESS_GRACE_MINUTES": "30",
+                },
+                clear=True,
+            ):
+                settings = config.load_settings(env_file=None)
+                with db.db_session(settings.db_path) as connection:
+                    db.init_db(connection)
+                    _seed_healthy_dashboard_state(connection)
+                    self._insert_previous_snapshot(connection)
+                    previous_health = {
+                        "freshness": {
+                            "current_next_match": {"match_key": "Q12", "round_label": "Q12", "scheduled_time": "2026-04-22T12:30:00+00:00"},
+                        }
+                    }
+                    db.record_healthcheck_run(
+                        connection,
+                        started_at=db.utc_now(),
+                        completed_at=db.utc_now(),
+                        status="healthy",
+                        reason_summary="previous",
+                        payload=previous_health,
+                    )
+                    connection.execute(
+                        """
+                        UPDATE competition_snapshots
+                        SET record_text = ?, fetched_at = ?
+                        WHERE team_number = ? AND fetched_at = ?
+                        """,
+                        ("3-1-0", db.utc_now(), "7157B", "2026-04-22T12:00:00+00:00"),
+                    )
+                    connection.execute(
+                        """
+                        UPDATE division_rankings_snapshots
+                        SET record_text = ?, snapshot_at = ?
+                        WHERE team_number = ? AND snapshot_at = ?
+                        """,
+                        ("3-1-0", db.utc_now(), "7157B", "2026-04-22T12:00:00+00:00"),
+                    )
+                    with (
+                        patch("storage.db.get_match_intelligence", return_value={"next_match": {"match_key": "Q12", "round_label": "Q12", "scheduled_time": "2026-04-22T12:30:00+00:00"}, "last_match": {}}),
+                        patch("storage.db._gui_surface_health", return_value={"name": "gui_surface", "status": "healthy", "summary": "GUI healthy."}),
+                        patch("storage.db._published_surface_health", return_value={"name": "published_surface", "status": "healthy", "summary": "Published healthy."}),
+                        patch("storage.db._notification_path_health", return_value={"name": "notification_path", "status": "healthy", "summary": "Discord healthy."}),
+                        patch("storage.db._service_supervision_health", return_value={"name": "service_supervision", "status": "healthy", "summary": "Services healthy."}),
+                    ):
+                        health = db.evaluate_dashboard_health(connection, settings)
+                self.assertEqual(health["components"]["match_progress"]["status"], "degraded")
+
+    def test_match_progress_failed_when_record_changes_and_next_match_stays_stuck(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                "os.environ",
+                {
+                    "BASE_DIR": tmp,
+                    "TIMEZONE": "UTC",
+                    "DASHBOARD_STALE_MINUTES": "5000000",
+                    "AI_RANKINGS_STALE_MINUTES": "5000000",
+                    "MATCH_PROGRESS_GRACE_MINUTES": "1",
+                },
+                clear=True,
+            ):
+                settings = config.load_settings(env_file=None)
+                with db.db_session(settings.db_path) as connection:
+                    db.init_db(connection)
+                    _seed_healthy_dashboard_state(connection)
+                    self._insert_previous_snapshot(connection)
+                    previous_health = {
+                        "freshness": {
+                            "current_next_match": {"match_key": "Q12", "round_label": "Q12", "scheduled_time": "2026-04-22T12:30:00+00:00"},
+                        }
+                    }
+                    db.record_healthcheck_run(
+                        connection,
+                        started_at=db.utc_now(),
+                        completed_at=db.utc_now(),
+                        status="healthy",
+                        reason_summary="previous",
+                        payload=previous_health,
+                    )
+                    connection.execute(
+                        """
+                        UPDATE competition_snapshots
+                        SET record_text = ?, fetched_at = ?
+                        WHERE team_number = ? AND fetched_at = ?
+                        """,
+                        ("3-1-0", "2026-04-22T12:08:00+00:00", "7157B", "2026-04-22T12:00:00+00:00"),
+                    )
+                    with (
+                        patch("storage.db.get_match_intelligence", return_value={"next_match": {"match_key": "Q12", "round_label": "Q12", "scheduled_time": "2026-04-22T12:30:00+00:00"}, "last_match": {}}),
+                        patch("storage.db._gui_surface_health", return_value={"name": "gui_surface", "status": "healthy", "summary": "GUI healthy."}),
+                        patch("storage.db._published_surface_health", return_value={"name": "published_surface", "status": "healthy", "summary": "Published healthy."}),
+                        patch("storage.db._notification_path_health", return_value={"name": "notification_path", "status": "healthy", "summary": "Discord healthy."}),
+                        patch("storage.db._service_supervision_health", return_value={"name": "service_supervision", "status": "healthy", "summary": "Services healthy."}),
+                    ):
+                        health = db.evaluate_dashboard_health(connection, settings)
+                self.assertEqual(health["components"]["match_progress"]["status"], "failed")
+                self.assertIn("slate is stuck", health["components"]["match_progress"]["summary"])
+
+    def test_match_progress_healthy_when_record_changes_and_no_next_match_remains(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                "os.environ",
+                {
+                    "BASE_DIR": tmp,
+                    "TIMEZONE": "UTC",
+                    "DASHBOARD_STALE_MINUTES": "5000000",
+                    "AI_RANKINGS_STALE_MINUTES": "5000000",
+                },
+                clear=True,
+            ):
+                settings = config.load_settings(env_file=None)
+                with db.db_session(settings.db_path) as connection:
+                    db.init_db(connection)
+                    _seed_healthy_dashboard_state(connection)
+                    self._insert_previous_snapshot(connection)
+                    previous_health = {
+                        "freshness": {
+                            "current_next_match": {"match_key": "Q12", "round_label": "Q12", "scheduled_time": "2026-04-22T12:30:00+00:00"},
+                        }
+                    }
+                    db.record_healthcheck_run(
+                        connection,
+                        started_at=db.utc_now(),
+                        completed_at=db.utc_now(),
+                        status="healthy",
+                        reason_summary="previous",
+                        payload=previous_health,
+                    )
+                    connection.execute(
+                        """
+                        UPDATE competition_snapshots
+                        SET record_text = ?, fetched_at = ?
+                        WHERE team_number = ? AND fetched_at = ?
+                        """,
+                        ("3-1-0", "2026-04-22T12:08:00+00:00", "7157B", "2026-04-22T12:00:00+00:00"),
+                    )
+                    with (
+                        patch("storage.db.get_match_intelligence", return_value={"next_match": None, "last_match": {}}),
+                        patch("storage.db._gui_surface_health", return_value={"name": "gui_surface", "status": "healthy", "summary": "GUI healthy."}),
+                        patch("storage.db._published_surface_health", return_value={"name": "published_surface", "status": "healthy", "summary": "Published healthy."}),
+                        patch("storage.db._notification_path_health", return_value={"name": "notification_path", "status": "healthy", "summary": "Discord healthy."}),
+                        patch("storage.db._service_supervision_health", return_value={"name": "service_supervision", "status": "healthy", "summary": "Services healthy."}),
+                    ):
+                        health = db.evaluate_dashboard_health(connection, settings)
+                self.assertEqual(health["components"]["match_progress"]["status"], "healthy")
 
     def test_run_self_heal_recovers_before_restart(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1075,6 +1692,61 @@ class DashboardHealthTests(unittest.TestCase):
                 ):
                     result = main.run_self_heal_cycle(settings)
                 self.assertEqual(result["status"], "healthy")
+                self.assertEqual(len(result["repair_attempts"]), 1)
+                mock_comp.assert_called_once()
+                mock_ai.assert_called_once()
+                mock_reports.assert_called_once()
+                mock_static.assert_called_once()
+                mock_publish.assert_not_called()
+                mock_restart.assert_not_called()
+
+    def test_run_self_heal_treats_published_surface_degraded_as_non_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict("os.environ", {"BASE_DIR": tmp, "MAX_AUTO_REPAIR_ATTEMPTS": "1"}, clear=True):
+                settings = config.load_settings(env_file=None)
+                unhealthy = {
+                    "status": "failed",
+                    "healthy": False,
+                    "reason_summary": "Rankings are stale.",
+                    "reasons": ["Rankings are stale."],
+                    "components": {
+                        "data_pipeline": {"status": "failed"},
+                        "match_progress": {"status": "healthy"},
+                        "gui_surface": {"status": "healthy"},
+                        "service_supervision": {"status": "healthy"},
+                        "published_surface": {"status": "degraded", "summary": "Static site stale."},
+                        "notification_path": {"status": "healthy"},
+                    },
+                }
+                locally_recovered = {
+                    "status": "degraded",
+                    "healthy": False,
+                    "reason_summary": "Static site stale.",
+                    "reasons": [],
+                    "warnings": ["Static site stale."],
+                    "components": {
+                        "data_pipeline": {"status": "healthy"},
+                        "match_progress": {"status": "healthy"},
+                        "gui_surface": {"status": "healthy"},
+                        "service_supervision": {"status": "healthy"},
+                        "published_surface": {"status": "degraded", "summary": "Static site stale."},
+                        "notification_path": {"status": "healthy"},
+                    },
+                }
+                with (
+                    patch("main.evaluate_dashboard_health", side_effect=[unhealthy, unhealthy, locally_recovered]),
+                    patch("main.run_competition_cycle", return_value={}) as mock_comp,
+                    patch("main.run_ai_rankings_cycle", return_value={}) as mock_ai,
+                    patch("main.write_reports", return_value={}) as mock_reports,
+                    patch("main.write_static_site", return_value={}) as mock_static,
+                    patch("main.publish_static_site", return_value={}) as mock_publish,
+                    patch("main.restart_managed_services", return_value={"status": "success"}) as mock_restart,
+                    patch("main.send_health_transition_alert", return_value=False),
+                ):
+                    result = main.run_self_heal_cycle(settings)
+                self.assertEqual(result["status"], "degraded")
+                self.assertIn("Local dashboard recovered", result["message"])
+                self.assertIn("Static site stale.", result["message"])
                 self.assertEqual(len(result["repair_attempts"]), 1)
                 mock_comp.assert_called_once()
                 mock_ai.assert_called_once()
@@ -1147,6 +1819,51 @@ class DashboardHealthTests(unittest.TestCase):
                 self.assertEqual(result["restart"]["status"], "skipped")
                 mock_restart.assert_not_called()
 
+    def test_run_self_heal_waits_for_discord_restart_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                "os.environ",
+                {
+                    "BASE_DIR": tmp,
+                    "MAX_AUTO_REPAIR_ATTEMPTS": "1",
+                    "DISCORD_WEBHOOK_URL": "https://discord.com/api/webhooks/test/value",
+                    "DISCORD_BOT_TOKEN": "bot-token",
+                    "DISCORD_CHANNEL_ID": "1234567890",
+                    "DISCORD_ALLOWED_USER_IDS": "42",
+                },
+                clear=True,
+            ):
+                settings = config.load_settings(env_file=None)
+                unhealthy = {
+                    "status": "failed",
+                    "healthy": False,
+                    "reason_summary": "Dashboard still unhealthy.",
+                    "reasons": ["Dashboard still unhealthy."],
+                }
+                approved_request = {
+                    "request_id": "drq-approval",
+                    "status": "approved",
+                    "response_text": "",
+                }
+                with (
+                    patch("main.evaluate_dashboard_health", side_effect=[unhealthy, unhealthy, unhealthy, unhealthy]),
+                    patch("main.run_competition_cycle", return_value={}),
+                    patch("main.run_ai_rankings_cycle", return_value={}),
+                    patch("main.write_reports", return_value={}),
+                    patch("main.write_static_site", return_value={}),
+                    patch("main.publish_static_site", return_value={}),
+                    patch("main.create_discord_request", return_value={"request_id": "drq-approval", "prompt_text": "Restart now?", "allowed_actions": ["restart_services"], "timeout_minutes": 20}),
+                    patch("main.post_discord_request", return_value={"id": "discord-msg-1"}),
+                    patch("main.mark_discord_request_posted", return_value={"request_id": "drq-approval", "status": "pending"}),
+                    patch("main.wait_for_discord_resolution", return_value=approved_request),
+                    patch("main.restart_managed_services", return_value={"status": "success", "message": "Restarted.", "results": []}) as mock_restart,
+                    patch("main.send_health_transition_alert", return_value=False),
+                ):
+                    result = main.run_self_heal_cycle(settings)
+                self.assertEqual(result["status"], "restart_requested")
+                self.assertEqual(result["discord_request"]["request_id"], "drq-approval")
+                mock_restart.assert_called_once_with(settings, ["backend", "gui"])
+
     def test_health_transition_alerts_on_status_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict("os.environ", {"BASE_DIR": tmp, "DISCORD_WEBHOOK_URL": "https://discord.example/webhook"}, clear=True):
@@ -1185,6 +1902,260 @@ class DashboardHealthTests(unittest.TestCase):
                 with patch("storage.db.httpx.Client.get", return_value=httpx.Response(500)):
                     component = db._notification_path_health(settings)
                 self.assertEqual(component["status"], "degraded")
+
+
+class DiscordBridgeTests(unittest.TestCase):
+    """Discord bridge parsing and persistence tests."""
+
+    def test_post_discord_request_includes_button_components(self) -> None:
+        request = {
+            "request_id": "drq-1234abcd",
+            "prompt_text": "Restart now?",
+            "allowed_actions": ["restart_services"],
+            "timeout_minutes": 20,
+        }
+        with patch("notify.discord_bridge.send_discord_channel_message", return_value={"id": "discord-msg-1"}) as mock_send:
+            with patch.dict(
+                "os.environ",
+                {
+                    "BASE_DIR": tempfile.gettempdir(),
+                    "DISCORD_BOT_TOKEN": "bot-token",
+                    "DISCORD_CHANNEL_ID": "1234567890",
+                    "DISCORD_ALLOWED_USER_IDS": "42",
+                },
+                clear=True,
+            ):
+                settings = config.load_settings(env_file=None)
+                discord_bridge.post_discord_request(settings, request)
+        components = mock_send.call_args.kwargs["components"]
+        self.assertEqual(len(components), 1)
+        custom_ids = [item["custom_id"] for item in components[0]["components"]]
+        self.assertIn("vexranker:drq-1234abcd:approve", custom_ids)
+        self.assertIn("vexranker:drq-1234abcd:deny", custom_ids)
+        self.assertIn("vexranker:drq-1234abcd:need_info", custom_ids)
+
+    def test_parse_discord_reply_accepts_expected_formats(self) -> None:
+        self.assertEqual(
+            discord_bridge.parse_discord_reply("approve drq-1234abcd"),
+            {"action": "approve", "request_id": "drq-1234abcd", "answer_text": ""},
+        )
+        self.assertEqual(
+            discord_bridge.parse_discord_reply("deny drq-1234abcd"),
+            {"action": "deny", "request_id": "drq-1234abcd", "answer_text": ""},
+        )
+        self.assertEqual(
+            discord_bridge.parse_discord_reply("answer drq-1234abcd: restart after finals"),
+            {"action": "answer", "request_id": "drq-1234abcd", "answer_text": "restart after finals"},
+        )
+        self.assertIsNone(discord_bridge.parse_discord_reply("approve"))
+        self.assertIsNone(discord_bridge.parse_discord_reply("answer drq-1234abcd"))
+
+    def test_parse_discord_button_custom_id_accepts_expected_formats(self) -> None:
+        self.assertEqual(
+            discord_bridge.parse_discord_button_custom_id("vexranker:drq-1234abcd:approve"),
+            {"request_id": "drq-1234abcd", "action": "approve"},
+        )
+        self.assertEqual(
+            discord_bridge.parse_discord_button_custom_id("vexranker:drq-1234abcd:need_info"),
+            {"request_id": "drq-1234abcd", "action": "need_info"},
+        )
+        self.assertIsNone(discord_bridge.parse_discord_button_custom_id("approve drq-1234abcd"))
+
+    def test_apply_discord_reply_ignores_unknown_or_duplicate_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict("os.environ", {"BASE_DIR": tmp}, clear=True):
+                settings = config.load_settings(env_file=None)
+                with db.db_session(settings.db_path) as connection:
+                    db.init_db(connection)
+                    result = db.apply_discord_reply(
+                        connection,
+                        {
+                            "request_id": "drq-missing",
+                            "discord_user_id": "1234",
+                            "discord_message_id": "m-1",
+                            "raw_text": "approve drq-missing",
+                            "parsed_action": "approve",
+                            "answer_text": "",
+                            "received_at": db.utc_now(),
+                        },
+                    )
+                    self.assertFalse(result["accepted"])
+
+                    request = db.create_discord_request(connection, "restart_approval", "Restart now?", ["restart_services"], 20)
+                    accepted = db.apply_discord_reply(
+                        connection,
+                        {
+                            "request_id": request["request_id"],
+                            "discord_user_id": "1234",
+                            "discord_message_id": "m-2",
+                            "raw_text": f"approve {request['request_id']}",
+                            "parsed_action": "approve",
+                            "answer_text": "",
+                            "received_at": db.utc_now(),
+                        },
+                    )
+                    self.assertTrue(accepted["accepted"])
+                    duplicate = db.apply_discord_reply(
+                        connection,
+                        {
+                            "request_id": request["request_id"],
+                            "discord_user_id": "1234",
+                            "discord_message_id": "m-2",
+                            "raw_text": f"approve {request['request_id']}",
+                            "parsed_action": "approve",
+                            "answer_text": "",
+                            "received_at": db.utc_now(),
+                        },
+                    )
+                    self.assertFalse(duplicate["accepted"])
+
+    def test_apply_discord_reply_updates_pending_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict("os.environ", {"BASE_DIR": tmp}, clear=True):
+                settings = config.load_settings(env_file=None)
+                with db.db_session(settings.db_path) as connection:
+                    db.init_db(connection)
+                    request = db.create_discord_request(connection, "restart_approval", "Restart now?", ["restart_services"], 20)
+                    result = db.apply_discord_reply(
+                        connection,
+                        {
+                            "request_id": request["request_id"],
+                            "discord_user_id": "1234",
+                            "discord_message_id": "m-3",
+                            "raw_text": f"answer {request['request_id']}: hold one round",
+                            "parsed_action": "answer",
+                            "answer_text": "hold one round",
+                            "received_at": "2026-04-23T12:00:00+00:00",
+                        },
+                    )
+                    self.assertTrue(result["accepted"])
+                    updated = db.get_discord_request_by_request_id(connection, request["request_id"])
+                    self.assertEqual(updated["status"], "answered")
+                    self.assertEqual(updated["response_text"], "hold one round")
+
+    def test_apply_discord_reply_tracks_button_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict("os.environ", {"BASE_DIR": tmp}, clear=True):
+                settings = config.load_settings(env_file=None)
+                with db.db_session(settings.db_path) as connection:
+                    db.init_db(connection)
+                    request = db.create_discord_request(connection, "restart_approval", "Restart now?", ["restart_services"], 20)
+                    result = db.apply_discord_reply(
+                        connection,
+                        {
+                            "request_id": request["request_id"],
+                            "discord_user_id": "1234",
+                            "discord_message_id": "m-4",
+                            "raw_text": "Need Info",
+                            "parsed_action": "need_info",
+                            "answer_text": "",
+                            "response_source": "button",
+                            "discord_interaction_id": "ix-1",
+                            "interaction_custom_id": f"vexranker:{request['request_id']}:need_info",
+                            "received_at": "2026-04-23T12:00:00+00:00",
+                        },
+                    )
+                    self.assertTrue(result["accepted"])
+                    updated = db.get_discord_request_by_request_id(connection, request["request_id"])
+                    self.assertEqual(updated["status"], "answered")
+                    self.assertEqual(updated["response_source"], "button")
+                    self.assertEqual(updated["last_operator_action"], "need_info")
+
+    def test_expire_pending_discord_requests_marks_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict("os.environ", {"BASE_DIR": tmp}, clear=True):
+                settings = config.load_settings(env_file=None)
+                with db.db_session(settings.db_path) as connection:
+                    db.init_db(connection)
+                    request = db.create_discord_request(connection, "restart_approval", "Restart now?", ["restart_services"], 1)
+                    expired = db.expire_pending_discord_requests(connection, now="2099-01-01T00:00:00+00:00")
+                    self.assertEqual(len(expired), 1)
+                    updated = db.get_discord_request_by_request_id(connection, request["request_id"])
+                    self.assertEqual(updated["status"], "expired")
+
+    def test_handle_discord_interaction_accepts_allowed_button(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                "os.environ",
+                {
+                    "BASE_DIR": tmp,
+                    "DISCORD_BOT_TOKEN": "bot-token",
+                    "DISCORD_CHANNEL_ID": "1234567890",
+                    "DISCORD_ALLOWED_USER_IDS": "42",
+                },
+                clear=True,
+            ):
+                settings = config.load_settings(env_file=None)
+                with db.db_session(settings.db_path) as connection:
+                    db.init_db(connection)
+                    request = db.create_discord_request(connection, "restart_approval", "Restart now?", ["restart_services"], 20)
+                payload = {
+                    "id": "ix-2",
+                    "type": 3,
+                    "token": "interaction-token",
+                    "member": {"user": {"id": "42"}},
+                    "message": {"id": "discord-msg-1"},
+                    "data": {"custom_id": f"vexranker:{request['request_id']}:approve"},
+                }
+                with patch("notify.discord_bridge._send_interaction_callback") as mock_callback:
+                    result = discord_bridge.handle_discord_interaction(settings, payload)
+                self.assertTrue(result["accepted"])
+                with db.db_session(settings.db_path) as connection:
+                    updated = db.get_discord_request_by_request_id(connection, request["request_id"])
+                self.assertEqual(updated["status"], "approved")
+                self.assertEqual(updated["response_source"], "button")
+                mock_callback.assert_called_once()
+
+    def test_handle_discord_interaction_rejects_untrusted_user(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                "os.environ",
+                {
+                    "BASE_DIR": tmp,
+                    "DISCORD_BOT_TOKEN": "bot-token",
+                    "DISCORD_CHANNEL_ID": "1234567890",
+                    "DISCORD_ALLOWED_USER_IDS": "42",
+                },
+                clear=True,
+            ):
+                settings = config.load_settings(env_file=None)
+                payload = {
+                    "id": "ix-3",
+                    "type": 3,
+                    "token": "interaction-token",
+                    "member": {"user": {"id": "999"}},
+                    "data": {"custom_id": "vexranker:drq-1234abcd:approve"},
+                }
+                with patch("notify.discord_bridge._send_interaction_callback") as mock_callback:
+                    result = discord_bridge.handle_discord_interaction(settings, payload)
+                self.assertFalse(result["accepted"])
+                self.assertEqual(result["reason"], "unauthorized_user")
+                mock_callback.assert_called_once()
+
+    def test_run_bridge_once_ignores_untrusted_users(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                "os.environ",
+                {
+                    "BASE_DIR": tmp,
+                    "DISCORD_BOT_TOKEN": "bot-token",
+                    "DISCORD_CHANNEL_ID": "1234567890",
+                    "DISCORD_ALLOWED_USER_IDS": "42",
+                    "DISCORD_TEXT_FALLBACK_ENABLED": "true",
+                },
+                clear=True,
+            ):
+                settings = config.load_settings(env_file=None)
+                with db.db_session(settings.db_path) as connection:
+                    db.init_db(connection)
+                    request = db.create_discord_request(connection, "restart_approval", "Restart now?", ["restart_services"], 20)
+                with (
+                    patch("notify.discord_bridge.fetch_channel_messages", return_value=[{"id": "m-4", "content": f"approve {request['request_id']}", "author": {"id": "999", "bot": False}, "timestamp": db.utc_now()}]),
+                    patch("notify.discord_bridge.post_discord_followup") as mock_followup,
+                ):
+                    result = discord_bridge.run_bridge_once(settings)
+                self.assertEqual(result["processed_replies"], 0)
+                mock_followup.assert_not_called()
 
 
 class StaticExportTests(unittest.TestCase):
@@ -1299,9 +2270,9 @@ class StaticExportTests(unittest.TestCase):
                 self.assertTrue((site_dir / "data" / "latest.json").exists())
                 dashboard_html = (site_dir / "index.html").read_text(encoding="utf-8")
                 ai_html = (site_dir / "ai-rankings" / "index.html").read_text(encoding="utf-8")
-                self.assertIn("Match Day View", dashboard_html)
+                self.assertIn("7157B Match Day", dashboard_html)
                 self.assertNotIn("Run Refresh", dashboard_html)
-                self.assertIn("Open AI Rankings", dashboard_html)
+                self.assertIn("AI Rankings", dashboard_html)
                 self.assertNotIn(str(db_path), ai_html)
                 self.assertEqual(Path(result["site_dir"]).resolve(), site_dir.resolve())
 
@@ -1321,6 +2292,125 @@ class StaticExportTests(unittest.TestCase):
                 result = publish_to_git_repo(settings)
         self.assertFalse(result["published"])
         self.assertIn("GITHUB_PAGES_REPO", result["reason"])
+
+    def test_static_export_writes_multi_team_payloads(self) -> None:
+        repo_base = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                "os.environ",
+                {
+                    "BASE_DIR": str(repo_base),
+                    "STATIC_SITE_DIR": str(Path(tmp) / "site"),
+                },
+                clear=True,
+            ):
+                settings = config.load_settings(env_file=None)
+                site_dir = settings.static_site_dir
+                db_path = Path(tmp) / "monitor.db"
+                with db.db_session(db_path) as connection:
+                    db.init_db(connection)
+                    db.record_division_rankings(
+                        connection,
+                        "2026-04-22T12:00:00+00:00",
+                        [
+                            {
+                                "event_sku": "RE",
+                                "division_name": "Technology",
+                                "team_number": "7157B",
+                                "team_name": "Mystery Machine",
+                                "organization": "Chittenango",
+                                "rank": 4,
+                                "wins": 3,
+                                "losses": 0,
+                                "ties": 0,
+                                "wp": 6,
+                                "ap": 8,
+                                "sp": 44,
+                                "average_score": 29,
+                                "record_text": "3-0-0",
+                                "source": "vex_via_local",
+                            },
+                            {
+                                "event_sku": "RE",
+                                "division_name": "Technology",
+                                "team_number": "3150V",
+                                "team_name": "Voltage",
+                                "organization": "Ranger",
+                                "rank": 15,
+                                "wins": 2,
+                                "losses": 1,
+                                "ties": 0,
+                                "wp": 4,
+                                "ap": 5,
+                                "sp": 30,
+                                "average_score": 20,
+                                "record_text": "2-1-0",
+                                "source": "vex_via_local",
+                            },
+                        ],
+                    )
+                    db.record_ai_rankings_snapshot(
+                        connection,
+                        "7157B",
+                        {
+                            "generated_at": "2026-04-22T12:05:00+00:00",
+                            "source_snapshot_at": "2026-04-22T12:00:00+00:00",
+                            "source_type": "vex_via_local",
+                            "confidence": {"level": "high", "body": "Fresh local standings available."},
+                            "headline": "7157B sits at official rank #4 with high confidence.",
+                            "why_it_matters": "The team is in the upper part of the division.",
+                            "official_rank": 4,
+                            "power_rank": None,
+                            "skills_total": None,
+                            "summary_blocks": [],
+                            "priority_factors": [],
+                            "threat_rows": [],
+                            "swing_rows": [],
+                            "alliance": {},
+                            "top_movers": [],
+                            "trend": {},
+                        },
+                    )
+                    db.record_ai_rankings_snapshot(
+                        connection,
+                        "3150V",
+                        {
+                            "generated_at": "2026-04-22T12:05:00+00:00",
+                            "source_snapshot_at": "2026-04-22T12:00:00+00:00",
+                            "source_type": "vex_via_local",
+                            "confidence": {"level": "high", "body": "Fresh local standings available."},
+                            "headline": "3150V sits at official rank #15 with high confidence.",
+                            "why_it_matters": "Still in range.",
+                            "official_rank": 15,
+                            "power_rank": None,
+                            "skills_total": None,
+                            "summary_blocks": [],
+                            "priority_factors": [],
+                            "threat_rows": [],
+                            "swing_rows": [],
+                            "alliance": {},
+                            "top_movers": [],
+                            "trend": {},
+                        },
+                    )
+                    view_7157b = db.build_dashboard_view(connection, "7157B", settings)
+                    view_3150v = db.build_dashboard_view(connection, "3150V", settings)
+                result = export_static_site(
+                    repo_base,
+                    settings,
+                    view_7157b,
+                    team_views={"7157B": view_7157b, "3150V": view_3150v},
+                )
+                manifest_path = site_dir / "data" / "teams" / "index.json"
+                team_payload_path = site_dir / "data" / "teams" / "3150V.json"
+                self.assertTrue(manifest_path.exists())
+                self.assertTrue(team_payload_path.exists())
+                manifest = manifest_path.read_text(encoding="utf-8")
+                payload = team_payload_path.read_text(encoding="utf-8")
+                self.assertIn("3150V", manifest)
+                self.assertIn("\"dashboard\":", payload)
+                self.assertIn("3150V Match Day", payload)
+                self.assertEqual(Path(result["site_dir"]).resolve(), site_dir.resolve())
 
 
 class MainTests(unittest.TestCase):

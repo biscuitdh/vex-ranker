@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sqlite3
+import time
 from pathlib import Path
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -23,6 +25,12 @@ from notify.discord import (
     send_rank_alert,
     send_skills_alert,
 )
+from notify.discord_bridge import (
+    discord_bridge_configured,
+    discord_configuration_issues,
+    post_discord_request,
+    wait_for_discord_resolution,
+)
 from reporters.json_export import write_json_export
 from reporters.markdown import write_markdown_report
 from reporters.static_site import export_static_site, publish_to_git_repo
@@ -31,7 +39,10 @@ from storage.db import (
     compute_and_store_derived_metrics,
     db_session,
     evaluate_dashboard_health,
+    create_discord_request,
+    get_available_teams,
     get_latest_healthcheck_run,
+    get_discord_request_by_request_id,
     generate_ai_rankings_snapshot,
     get_latest_restart_event,
     get_latest_team_skill,
@@ -47,14 +58,55 @@ from storage.db import (
     record_repair_attempt,
     record_restart_event,
     record_skills_snapshot,
+    mark_discord_request_posted,
+    update_discord_request_status,
     upsert_division_matches,
     upsert_matches,
     utc_now,
 )
 from utils.logging import configure_logging
+from utils.runtime_lock import runtime_lock
 from utils.service_control import restart_managed_services
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _is_locked_error(exc: Exception) -> bool:
+    """Return whether an exception represents SQLite lock contention."""
+    return isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower()
+
+
+def _run_with_lock_retry(
+    action_name: str,
+    runner,
+    settings: Settings,
+    *,
+    attempts: int = 3,
+    delay_seconds: float = 1.0,
+) -> object:
+    """Run one action with a short retry loop for SQLite lock contention."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return runner(settings)
+        except Exception as exc:
+            if not _is_locked_error(exc) or attempt == attempts:
+                raise
+            LOGGER.warning(
+                "Action hit a transient SQLite lock; retrying",
+                extra={"action": action_name, "attempt": attempt, "error": str(exc)},
+            )
+            time.sleep(delay_seconds * attempt)
+
+
+def _generate_ai_rankings_for_event_teams(connection, settings: Settings) -> dict[str, dict[str, object]]:
+    """Generate AI rankings snapshots for all currently available division teams."""
+    payloads: dict[str, dict[str, object]] = {}
+    for item in get_available_teams(connection, settings.team_number, limit=250):
+        team_number = str(item.get("team_number") or "").strip()
+        if not team_number:
+            continue
+        payloads[team_number] = generate_ai_rankings_snapshot(connection, team_number)
+    return payloads
 
 
 def _health_payload_from_row(row: dict[str, object] | None) -> dict[str, object] | None:
@@ -78,6 +130,7 @@ def _power_weights(settings: Settings) -> dict[str, float]:
         "ccwm": settings.power_rank_weight_ccwm,
         "skills": settings.power_rank_weight_skills,
         "form": settings.power_rank_weight_form,
+        "manual": settings.power_rank_weight_manual,
     }
 
 
@@ -115,6 +168,12 @@ def _select_competition_result(primary, secondary):
 
 def run_competition_cycle(settings: Settings) -> dict[str, object]:
     """Run the RobotEvents collection cycle."""
+    with runtime_lock(settings.data_dir, "db-writer", timeout_seconds=180):
+        return _run_competition_cycle_unlocked(settings)
+
+
+def _run_competition_cycle_unlocked(settings: Settings) -> dict[str, object]:
+    """Run the RobotEvents collection cycle without acquiring the external runtime lock."""
     started_at = utc_now()
     with db_session(settings.db_path) as connection:
         init_db(connection)
@@ -206,7 +265,8 @@ def run_competition_cycle(settings: Settings) -> dict[str, object]:
                 len(result.division_rankings),
                 "; ".join(result.warnings),
             )
-            ai_rankings = generate_ai_rankings_snapshot(connection, settings.team_number)
+            ai_rankings_by_team = _generate_ai_rankings_for_event_teams(connection, settings)
+            ai_rankings = ai_rankings_by_team.get(settings.team_number) or {}
             view = build_dashboard_view(connection, settings.team_number, settings)
             with httpx.Client(timeout=settings.request_timeout_seconds) as discord_client:
                 send_rank_alert(connection, settings, view["latest_snapshot"], view["delta"], client=discord_client)
@@ -224,6 +284,7 @@ def run_competition_cycle(settings: Settings) -> dict[str, object]:
                 "warnings": result.warnings,
                 "result_tabs": result.result_tabs,
                 "ai_rankings": ai_rankings,
+                "ai_rankings_by_team": ai_rankings_by_team,
             }
         except Exception as exc:
             record_collector_run(
@@ -282,12 +343,13 @@ def run_media_cycle(settings: Settings) -> dict[str, object]:
 
 def write_reports(settings: Settings) -> dict[str, str]:
     """Write the latest markdown and JSON reports."""
-    with db_session(settings.db_path) as connection:
-        init_db(connection)
-        view = build_dashboard_view(connection, settings.team_number, settings)
-        markdown_path = write_markdown_report(settings.reports_dir, view)
-        json_path = write_json_export(settings.reports_dir, view)
-        return {"markdown": str(markdown_path), "json": str(json_path)}
+    with runtime_lock(settings.data_dir, "db-writer", timeout_seconds=180):
+        with db_session(settings.db_path) as connection:
+            init_db(connection)
+            view = build_dashboard_view(connection, settings.team_number, settings)
+            markdown_path = write_markdown_report(settings.reports_dir, view)
+            json_path = write_json_export(settings.reports_dir, view)
+            return {"markdown": str(markdown_path), "json": str(json_path)}
 
 
 def build_current_view(settings: Settings) -> dict[str, object]:
@@ -297,42 +359,56 @@ def build_current_view(settings: Settings) -> dict[str, object]:
         return build_dashboard_view(connection, settings.team_number, settings)
 
 
+def build_all_current_views(settings: Settings) -> dict[str, dict[str, object]]:
+    """Load the latest dashboard views for all current division teams."""
+    with db_session(settings.db_path) as connection:
+        init_db(connection)
+        views: dict[str, dict[str, object]] = {}
+        for item in get_available_teams(connection, settings.team_number, limit=250):
+            team_number = str(item.get("team_number") or "").strip()
+            if not team_number:
+                continue
+            views[team_number] = build_dashboard_view(connection, team_number, settings, include_operations=False)
+        if settings.team_number not in views:
+            views[settings.team_number] = build_dashboard_view(connection, settings.team_number, settings, include_operations=False)
+        return views
+
+
 def write_static_site(settings: Settings) -> dict[str, str]:
     """Render the static site bundle from the latest stored view."""
-    started_at = utc_now()
-    try:
-        view = build_current_view(settings)
-        result = export_static_site(settings.base_dir, settings, view)
-        with db_session(settings.db_path) as connection:
-            init_db(connection)
-            record_collector_run(connection, "static_site", started_at, utc_now(), True, 1, "")
-        return result
-    except Exception as exc:
-        with db_session(settings.db_path) as connection:
-            init_db(connection)
-            record_collector_run(connection, "static_site", started_at, utc_now(), False, 0, str(exc))
-        raise
+    with runtime_lock(settings.data_dir, "db-writer", timeout_seconds=180):
+        started_at = utc_now()
+        try:
+            team_views = build_all_current_views(settings)
+            result = export_static_site(settings.base_dir, settings, team_views[settings.team_number], team_views=team_views)
+            with db_session(settings.db_path) as connection:
+                init_db(connection)
+                record_collector_run(connection, "static_site", started_at, utc_now(), True, len(team_views), "")
+            return result
+        except Exception as exc:
+            with db_session(settings.db_path) as connection:
+                init_db(connection)
+                record_collector_run(connection, "static_site", started_at, utc_now(), False, 0, str(exc))
+            raise
 
 
 def publish_static_site(settings: Settings) -> dict[str, object]:
     """Publish the current static site when publishing is configured."""
-    started_at = utc_now()
-    result = publish_to_git_repo(settings)
-    success = bool(result.get("published")) or str(result.get("reason") or "") == "No site changes to publish."
-    summary = str(result.get("reason") or "")
-    with db_session(settings.db_path) as connection:
-        init_db(connection)
-        record_collector_run(connection, "publish_static", started_at, utc_now(), success, int(bool(result.get("published"))), summary)
-    return result
+    with runtime_lock(settings.data_dir, "db-writer", timeout_seconds=180):
+        started_at = utc_now()
+        result = publish_to_git_repo(settings)
+        success = bool(result.get("published")) or str(result.get("reason") or "") == "No site changes to publish."
+        summary = str(result.get("reason") or "")
+        with db_session(settings.db_path) as connection:
+            init_db(connection)
+            record_collector_run(connection, "publish_static", started_at, utc_now(), success, int(bool(result.get("published"))), summary)
+        return result
 
 
 def run_static_publish(settings: Settings) -> dict[str, object]:
     """Refresh local state, export the static site, and optionally push it."""
     results: dict[str, object] = {"refresh": {}, "reports": {}, "site": {}, "publish": {}}
-    for cycle_name, runner in (
-        ("competition", run_competition_cycle),
-        ("media", run_media_cycle),
-    ):
+    for cycle_name, runner in (("competition", run_competition_cycle),):
         try:
             results["refresh"][cycle_name] = runner(settings)
         except Exception as exc:
@@ -351,32 +427,33 @@ def run_static_publish(settings: Settings) -> dict[str, object]:
 
 def run_ai_rankings_cycle(settings: Settings) -> dict[str, object]:
     """Generate and persist the latest hourly AI rankings synthesis."""
-    started_at = utc_now()
-    with db_session(settings.db_path) as connection:
-        init_db(connection)
-        try:
-            payload = generate_ai_rankings_snapshot(connection, settings.team_number)
-            record_collector_run(
-                connection,
-                "ai_rankings",
-                started_at,
-                utc_now(),
-                True,
-                1,
-            )
-            return payload
-        except Exception as exc:
-            record_collector_run(
-                connection,
-                "ai_rankings",
-                started_at,
-                utc_now(),
-                False,
-                0,
-                str(exc),
-            )
-            LOGGER.exception("AI rankings cycle failed")
-            raise
+    with runtime_lock(settings.data_dir, "db-writer", timeout_seconds=180):
+        started_at = utc_now()
+        with db_session(settings.db_path) as connection:
+            init_db(connection)
+            try:
+                payloads = _generate_ai_rankings_for_event_teams(connection, settings)
+                record_collector_run(
+                    connection,
+                    "ai_rankings",
+                    started_at,
+                    utc_now(),
+                    True,
+                    len(payloads),
+                )
+                return payloads.get(settings.team_number) or next(iter(payloads.values()), {})
+            except Exception as exc:
+                record_collector_run(
+                    connection,
+                    "ai_rankings",
+                    started_at,
+                    utc_now(),
+                    False,
+                    0,
+                    str(exc),
+                )
+                LOGGER.exception("AI rankings cycle failed")
+                raise
 
 
 def run_dashboard_healthcheck(settings: Settings) -> dict[str, object]:
@@ -452,8 +529,129 @@ def _record_final_health_state(
     return payload
 
 
+def _local_self_heal_components_healthy(payload: dict[str, object]) -> bool:
+    """Return whether the local match-day critical surfaces are healthy enough."""
+    components = payload.get("components")
+    if not isinstance(components, dict) or not components:
+        return bool(payload.get("healthy"))
+    critical_components = ("data_pipeline", "match_progress", "gui_surface", "service_supervision")
+    for name in critical_components:
+        component = components.get(name)
+        if not isinstance(component, dict):
+            return bool(payload.get("healthy"))
+        if str(component.get("status") or "").lower() != "healthy":
+            return False
+    return True
+
+
+def _local_self_heal_message(payload: dict[str, object], attempt_number: int) -> str:
+    """Build a match-day focused recovery message."""
+    if payload.get("healthy"):
+        return f"Dashboard recovered after repair attempt {attempt_number}."
+    components = payload.get("components")
+    if not isinstance(components, dict):
+        return f"Local dashboard recovered after repair attempt {attempt_number}."
+    degraded_noncritical = []
+    for name in ("published_surface", "notification_path"):
+        component = components.get(name)
+        if isinstance(component, dict) and str(component.get("status") or "").lower() == "degraded":
+            degraded_noncritical.append(str(component.get("summary") or name))
+    if degraded_noncritical:
+        return (
+            f"Local dashboard recovered after repair attempt {attempt_number}, "
+            f"but non-critical surfaces remain degraded: {'; '.join(degraded_noncritical[:2])}"
+        )
+    return f"Local dashboard recovered after repair attempt {attempt_number}."
+
+
+def _log_discord_configuration_status(settings: Settings) -> None:
+    """Log actionable Discord configuration issues at startup."""
+    for issue in discord_configuration_issues(settings):
+        LOGGER.warning(issue)
+
+
+def _request_discord_restart_approval(
+    settings: Settings,
+    *,
+    healthcheck_run_id: int,
+    latest_health: dict[str, object],
+) -> dict[str, object]:
+    """Create, post, and wait on a Discord restart approval request."""
+    reason_summary = str(latest_health.get("reason_summary") or "Dashboard remained unhealthy after repair attempts.")
+    prompt = (
+        f"Vex Ranker self-heal is still blocked for team {settings.team_number}. "
+        f"Reason: {reason_summary} "
+        f"Approve a managed restart of backend and GUI services only if you want the monitor to attempt it remotely."
+    )
+    with db_session(settings.db_path) as connection:
+        init_db(connection)
+        request = create_discord_request(
+            connection,
+            category="restart_approval",
+            prompt=prompt,
+            allowed_actions=["restart_services"],
+            timeout_minutes=settings.discord_reply_timeout_minutes,
+        )
+    try:
+        posted = post_discord_request(settings, request)
+        with db_session(settings.db_path) as connection:
+            init_db(connection)
+            request = mark_discord_request_posted(connection, str(request.get("request_id") or ""), str(posted.get("id") or ""))
+    except Exception as exc:
+        LOGGER.warning("Discord approval request failed to post", extra={"error": str(exc)})
+        with db_session(settings.db_path) as connection:
+            init_db(connection)
+            request = update_discord_request_status(
+                connection,
+                str(request.get("request_id") or ""),
+                "expired",
+                response_text=f"Discord request delivery failed: {exc}",
+                resolved_at=utc_now(),
+                extra_payload={"delivery_error": str(exc), "healthcheck_run_id": healthcheck_run_id},
+            )
+        return {
+            "status": "delivery_failed",
+            "message": f"Discord approval request could not be delivered: {exc}",
+            "request": request,
+        }
+
+    resolved_request = wait_for_discord_resolution(
+        settings,
+        str(request.get("request_id") or ""),
+        settings.discord_reply_timeout_minutes,
+    )
+    if resolved_request is None:
+        with db_session(settings.db_path) as connection:
+            init_db(connection)
+            resolved_request = get_discord_request_by_request_id(connection, str(request.get("request_id") or ""))
+    status = str((resolved_request or {}).get("status") or "expired")
+    if status == "pending":
+        with db_session(settings.db_path) as connection:
+            init_db(connection)
+            resolved_request = update_discord_request_status(
+                connection,
+                str(request.get("request_id") or ""),
+                "expired",
+                response_text="Timed out waiting for a Discord approval reply.",
+                resolved_at=utc_now(),
+                extra_payload={"healthcheck_run_id": healthcheck_run_id},
+            )
+        status = "expired"
+    return {
+        "status": status,
+        "message": str((resolved_request or {}).get("response_text") or ""),
+        "request": resolved_request,
+    }
+
+
 def run_self_heal_cycle(settings: Settings) -> dict[str, object]:
     """Check dashboard health, attempt repairs, and escalate to managed restarts if required."""
+    with runtime_lock(settings.data_dir, "db-writer", timeout_seconds=240):
+        return _run_self_heal_cycle_unlocked(settings)
+
+
+def _run_self_heal_cycle_unlocked(settings: Settings) -> dict[str, object]:
+    """Check dashboard health, attempt repairs, and escalate to managed restarts without the external runtime lock."""
     if not settings.enable_auto_heal:
         return {
             "status": "disabled",
@@ -463,10 +661,18 @@ def run_self_heal_cycle(settings: Settings) -> dict[str, object]:
         }
 
     started_at = utc_now()
+    LOGGER.info("Self-heal cycle starting", extra={"team": settings.team_number, "event": settings.event_sku})
     with db_session(settings.db_path) as connection:
+        LOGGER.info("Self-heal initializing database", extra={"db_path": str(settings.db_path)})
         init_db(connection)
+        LOGGER.info("Self-heal loading previous health", extra={"db_path": str(settings.db_path)})
         previous_health = _health_payload_from_row(get_latest_healthcheck_run(connection))
+        LOGGER.info("Self-heal evaluating initial health", extra={"team": settings.team_number})
         initial_health = evaluate_dashboard_health(connection, settings)
+        LOGGER.info(
+            "Self-heal recording initial health",
+            extra={"status": str(initial_health.get("status") or "unknown"), "reason": str(initial_health.get("reason_summary") or "")},
+        )
         healthcheck_id = record_healthcheck_run(
             connection,
             started_at=started_at,
@@ -475,6 +681,7 @@ def run_self_heal_cycle(settings: Settings) -> dict[str, object]:
             reason_summary=str(initial_health.get("reason_summary") or ""),
             payload=initial_health,
         )
+        LOGGER.info("Self-heal initial health persisted", extra={"healthcheck_run_id": healthcheck_id})
 
     result: dict[str, object] = {
         "status": str(initial_health.get("status") or "unknown"),
@@ -502,14 +709,17 @@ def run_self_heal_cycle(settings: Settings) -> dict[str, object]:
         attempt_started_at = utc_now()
         actions: list[str] = []
         errors: list[str] = []
+        LOGGER.info("Self-heal repair attempt starting", extra={"attempt": attempt_number, "healthcheck_run_id": healthcheck_id})
         for action_name, runner in (
             ("competition", run_competition_cycle),
             ("ai_rankings", run_ai_rankings_cycle),
             ("reports", write_reports),
         ):
             try:
-                runner(settings)
+                LOGGER.info("Self-heal running action", extra={"attempt": attempt_number, "action": action_name})
+                _run_with_lock_retry(action_name, runner, settings)
                 actions.append(action_name)
+                LOGGER.info("Self-heal action complete", extra={"attempt": attempt_number, "action": action_name})
             except Exception as exc:
                 errors.append(f"{action_name}: {exc}")
                 LOGGER.warning(
@@ -519,9 +729,11 @@ def run_self_heal_cycle(settings: Settings) -> dict[str, object]:
 
         with db_session(settings.db_path) as connection:
             init_db(connection)
+            LOGGER.info("Self-heal evaluating intermediate health", extra={"attempt": attempt_number})
             intermediate_health = evaluate_dashboard_health(connection, settings)
         if intermediate_health.get("components", {}).get("gui_surface", {}).get("status") == "failed":
             try:
+                LOGGER.info("Self-heal restarting GUI service", extra={"attempt": attempt_number})
                 restart_managed_services(settings, ["gui"])
                 actions.append("gui_restart")
             except Exception as exc:
@@ -529,22 +741,17 @@ def run_self_heal_cycle(settings: Settings) -> dict[str, object]:
                 LOGGER.warning("Self-heal GUI restart failed", extra={"attempt": attempt_number, "error": str(exc)})
 
         try:
-            write_static_site(settings)
+            LOGGER.info("Self-heal running action", extra={"attempt": attempt_number, "action": "static_site"})
+            _run_with_lock_retry("static_site", write_static_site, settings)
             actions.append("static_site")
+            LOGGER.info("Self-heal action complete", extra={"attempt": attempt_number, "action": "static_site"})
         except Exception as exc:
             errors.append(f"static_site: {exc}")
             LOGGER.warning("Self-heal action failed", extra={"action": "static_site", "attempt": attempt_number, "error": str(exc)})
 
-        if settings.git_push_enabled or settings.github_pages_repo:
-            try:
-                publish_static_site(settings)
-                actions.append("publish_static")
-            except Exception as exc:
-                errors.append(f"publish_static: {exc}")
-                LOGGER.warning("Self-heal publish failed", extra={"attempt": attempt_number, "error": str(exc)})
-
         with db_session(settings.db_path) as connection:
             init_db(connection)
+            LOGGER.info("Self-heal evaluating post-repair health", extra={"attempt": attempt_number})
             post_health = evaluate_dashboard_health(connection, settings)
             attempt_payload = {
                 "attempt_number": attempt_number,
@@ -552,7 +759,11 @@ def run_self_heal_cycle(settings: Settings) -> dict[str, object]:
                 "errors": errors,
                 "post_health": post_health,
             }
-            attempt_status = "success" if post_health.get("healthy") else "failed"
+            attempt_status = "success" if _local_self_heal_components_healthy(post_health) else "failed"
+            LOGGER.info(
+                "Self-heal recording repair attempt",
+                extra={"attempt": attempt_number, "attempt_status": attempt_status, "actions": actions, "error_count": len(errors)},
+            )
             repair_attempt_id = record_repair_attempt(
                 connection,
                 healthcheck_run_id=healthcheck_id,
@@ -575,9 +786,10 @@ def run_self_heal_cycle(settings: Settings) -> dict[str, object]:
         )
         result["final_health"] = post_health
         result["status"] = str(post_health.get("status") or "unknown")
-        if post_health.get("healthy"):
+        if _local_self_heal_components_healthy(post_health):
             with db_session(settings.db_path) as connection:
                 init_db(connection)
+                LOGGER.info("Self-heal recording recovered final health", extra={"attempt": attempt_number})
                 final_health = _record_final_health_state(
                     connection,
                     settings=settings,
@@ -586,14 +798,31 @@ def run_self_heal_cycle(settings: Settings) -> dict[str, object]:
                     payload=post_health,
                 )
             result["final_health"] = final_health
-            result["message"] = f"Dashboard recovered after repair attempt {attempt_number}."
+            result["message"] = _local_self_heal_message(final_health, attempt_number)
             return result
 
     with db_session(settings.db_path) as connection:
         init_db(connection)
+        LOGGER.info("Self-heal evaluating final health before restart decision", extra={"healthcheck_run_id": healthcheck_id})
         latest_restart_event = get_latest_restart_event(connection)
         latest_health = evaluate_dashboard_health(connection, settings)
         restart_allowed, restart_reason = _restart_allowed(settings, latest_restart_event)
+
+    if _local_self_heal_components_healthy(latest_health):
+        with db_session(settings.db_path) as connection:
+            init_db(connection)
+            LOGGER.info("Self-heal recording locally recovered final health", extra={"healthcheck_run_id": healthcheck_id})
+            final_health = _record_final_health_state(
+                connection,
+                settings=settings,
+                started_at=started_at,
+                previous_health=previous_health,
+                payload=latest_health,
+            )
+        result["final_health"] = final_health
+        result["status"] = str(final_health.get("status") or "unknown")
+        result["message"] = _local_self_heal_message(final_health, settings.max_auto_repair_attempts)
+        return result
 
     if not restart_allowed:
         restart_payload = {
@@ -626,6 +855,58 @@ def run_self_heal_cycle(settings: Settings) -> dict[str, object]:
         result["final_health"] = final_health
         result["message"] = restart_reason
         return result
+
+    if discord_bridge_configured(settings):
+        approval = _request_discord_restart_approval(
+            settings,
+            healthcheck_run_id=healthcheck_id,
+            latest_health=latest_health,
+        )
+        result["discord_request"] = approval.get("request") or {}
+        approval_status = str(approval.get("status") or "expired")
+        if approval_status != "approved":
+            resolved_action = str(((approval.get("request") or {}).get("last_operator_action")) or "")
+            blocker_message = {
+                "denied": "Discord denied the managed restart request.",
+                "answered": (
+                    "Discord requested more information before approving the restart."
+                    if resolved_action == "need_info"
+                    else "Discord replied with information, but the restart was not approved."
+                ),
+                "expired": "Discord approval timed out before a managed restart was approved.",
+                "delivery_failed": str(approval.get("message") or "Discord approval request could not be delivered."),
+            }.get(approval_status, "Managed restart was not approved through Discord.")
+            restart_payload = {
+                "status": "skipped",
+                "message": blocker_message,
+                "targets": ["backend", "gui"],
+                "results": [],
+                "discord_request_id": str((approval.get("request") or {}).get("request_id") or ""),
+            }
+            with db_session(settings.db_path) as connection:
+                init_db(connection)
+                restart_event_id = record_restart_event(
+                    connection,
+                    healthcheck_run_id=healthcheck_id,
+                    requested_at=utc_now(),
+                    completed_at=utc_now(),
+                    status="skipped",
+                    reason_summary=blocker_message,
+                    targets=["backend", "gui"],
+                    payload=restart_payload,
+                )
+                final_health = _record_final_health_state(
+                    connection,
+                    settings=settings,
+                    started_at=started_at,
+                    previous_health=previous_health,
+                    payload=latest_health,
+                )
+            restart_payload["restart_event_id"] = restart_event_id
+            result["restart"] = restart_payload
+            result["final_health"] = final_health
+            result["message"] = blocker_message
+            return result
 
     restart_payload = restart_managed_services(settings, ["backend", "gui"])
     with db_session(settings.db_path) as connection:
@@ -709,6 +990,7 @@ def main() -> None:
     if args.log_level:
         settings.log_level = args.log_level.upper()
     configure_logging(settings.log_dir, settings.log_level)
+    _log_discord_configuration_status(settings)
     LOGGER.info(
         "Starting monitor",
         extra={"event": settings.event_sku, "team": settings.team_number},

@@ -6,6 +6,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 
+def _team_label(view: dict[str, Any]) -> str:
+    """Return the selected team number for human-facing copy."""
+    snapshot = view.get("latest_snapshot") or {}
+    return str(snapshot.get("team_number") or view.get("selected_team_number") or "this team")
+
+
 def _source_health(rankings_status: dict[str, Any], collector_runs: list[dict[str, Any]]) -> str:
     """Summarize collector/source health."""
     source = rankings_status.get("snapshot_source") or "unknown"
@@ -56,8 +62,9 @@ def _team_brief(view: dict[str, Any]) -> str:
     snapshot = view.get("latest_snapshot")
     power = view.get("team_power")
     skill = view.get("team_skill")
+    manual_note = view.get("team_manual_note") or {}
     if not snapshot:
-        return "Team 7157B has no current focal snapshot yet, so the console is operating in discovery mode."
+        return f"Team {_team_label(view)} has no current focal snapshot yet, so the console is operating in discovery mode."
     parts = [
         f"Team {snapshot.get('team_number')} is being tracked in the {snapshot.get('division_name')} Division.",
         f"Current official position is #{snapshot.get('rank') or 'N/A'} with record {snapshot.get('record_text') or 'unknown'}.",
@@ -69,6 +76,10 @@ def _team_brief(view: dict[str, Any]) -> str:
     if skill:
         parts.append(
             f"Latest skills total is {skill.get('total_score')} from driver {skill.get('driver_score')} and programming {skill.get('programming_score')}."
+        )
+    if manual_note:
+        parts.append(
+            f"Coach sheet signal is {manual_note.get('confidence', 'unknown')} confidence with note: {manual_note.get('raw_note') or 'none'}."
         )
     return " ".join(parts)
 
@@ -209,7 +220,7 @@ def _threat_brief(view: dict[str, Any]) -> str:
         f"{item.get('team_number')} (official #{item.get('official_rank') or 'N/A'}, power #{item.get('power_rank') or 'N/A'})"
         for item in top
     )
-    return f"Closest current division threats to 7157B: {formatted}."
+    return f"Closest current division threats to {_team_label(view)}: {formatted}."
 
 
 def _alliance_brief(view: dict[str, Any]) -> str:
@@ -345,9 +356,10 @@ def build_ai_rankings(view: dict[str, Any]) -> dict[str, Any]:
     rank_direction = (view.get("delta") or {}).get("rank_direction", "unknown")
     power_direction = (view.get("power_delta") or {}).get("power_rank_direction", "unknown")
 
+    team_label = _team_label(view)
     if snapshot:
         headline = (
-            f"7157B sits at official rank #{official_rank or 'N/A'} "
+            f"{team_label} sits at official rank #{official_rank or 'N/A'} "
             f"and power rank #{power_rank or 'N/A'} with {confidence_level} confidence."
         )
         why_it_matters = (
@@ -355,7 +367,7 @@ def build_ai_rankings(view: dict[str, Any]) -> dict[str, Any]:
             f"This matters because nearby Technology teams can compress the standings quickly once more qualification data lands."
         )
     else:
-        headline = "7157B does not have enough current standings data for an AI rankings brief yet."
+        headline = f"{team_label} does not have enough current standings data for an AI rankings brief yet."
         why_it_matters = "The monitor needs at least one focal-team standings snapshot before it can synthesize a useful rankings brief."
 
     top_threat = threat_list[0] if threat_list else None
@@ -363,10 +375,11 @@ def build_ai_rankings(view: dict[str, Any]) -> dict[str, Any]:
     best_partner = (alliance_impact.get("partner_rows") or [None])[0]
     toughest_opponent = (alliance_impact.get("opponent_rows") or [None])[0]
     next_match = match_intelligence.get("next_match") or {}
+    team_manual_note = view.get("team_manual_note") or {}
 
     summary_blocks = [
         {
-            "title": "7157B Outlook",
+            "title": f"{team_label} Outlook",
             "body": _team_brief(view),
         },
         {
@@ -417,6 +430,11 @@ def build_ai_rankings(view: dict[str, Any]) -> dict[str, Any]:
         opponents = ", ".join(next_match.get("opponent_teams") or ["TBD"])
         priority_factors.append(
             f"Next known match is {next_match.get('round_label') or next_match.get('match_key')} against {opponents} at {next_match.get('scheduled_time') or 'TBD'}."
+        )
+    if team_manual_note:
+        priority_factors.append(
+            f"Coach-note overlay for {team_label} is {team_manual_note.get('confidence', 'unknown')} confidence: "
+            f"{team_manual_note.get('raw_note') or team_manual_note.get('blue_record_text') or 'no detail'}."
         )
     if not priority_factors:
         priority_factors.append("Not enough fresh standings and match context are loaded yet to prioritize ranking factors.")

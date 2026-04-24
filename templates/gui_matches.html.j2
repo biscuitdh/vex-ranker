@@ -2,10 +2,11 @@
 {% import "gui_primitives.html.j2" as ui %}
 {% set page_title = "Matches" %}
 {% block content %}
-  {% call ui.page_intro("Matches", "Completed And Upcoming Matches", "Track what already happened and what is queued next for the team.") %}
-    <a class="header-action" href="{{ '/' if not static_site else '../index.html' }}">Back To Dashboard</a>
+  {% set team_label = selected_team_number or (latest_snapshot.team_number if latest_snapshot else settings.team_number) %}
+  {% call ui.page_intro("Matches", team_label ~ " Match Slate", "Track what already happened and what is queued next for the selected team.") %}
+    <a class="header-action" href="{{ ('/' ~ team_query) if not static_site and team_query else ('/' if not static_site else '../index.html' ~ team_query) }}">Back To Dashboard</a>
     {% if static_site %}
-      <a class="header-action" href="../ai-rankings/">Open AI Rankings</a>
+      <a class="header-action" href="../ai-rankings/{{ team_query }}">Open AI Rankings</a>
     {% endif %}
   {% endcall %}
 
@@ -81,7 +82,7 @@
   </div>
 
   <section class="summary-card" style="margin-top: 16px;">
-    {{ ui.section_header("Slate", "Ranked Upcoming Matchups", "The next known 7157B matchups with partner and opponent ranking context across the slate.") }}
+    {{ ui.section_header("Slate", "Ranked Upcoming Matchups", "The next known matchups with partner and opponent ranking context across the slate.") }}
     {% if matchup_summary %}
       <div class="muted-panel" style="margin-bottom: 12px;">{{ matchup_summary.headline }}</div>
     {% endif %}
@@ -108,13 +109,13 @@
         </tbody>
       </table>
     {% else %}
-      <div class="muted-panel">No upcoming 7157B matchup slate is available from the local cache yet. VEX Via may be showing newer in-memory data than the local SQLite cache.</div>
+      <div class="muted-panel">No upcoming {{ team_label }} matchup slate is available from the local cache yet. VEX Via may be showing newer in-memory data than the local SQLite cache.</div>
     {% endif %}
   </section>
 
   <div class="split">
     <section class="summary-card">
-      {{ ui.section_header("Swing", "Swing Matches", "Upcoming matches most likely to move 7157B's trajectory based on opponent closeness and scoring pressure.") }}
+      {{ ui.section_header("Swing", "Swing Matches", "Upcoming matches most likely to move the selected team’s trajectory based on opponent closeness and scoring pressure.") }}
       {% if swing_matches %}
         <table>
           <thead>
@@ -142,7 +143,7 @@
   {% if not static_site %}
   <div class="split">
     <section class="summary-card">
-      {{ ui.section_header("Alliance", "Partner Impact", "Which partners have coincided with the strongest observed margins for 7157B so far.") }}
+      {{ ui.section_header("Alliance", "Partner Impact", "Which partners have coincided with the strongest observed margins for the selected team so far.") }}
       {% if alliance_impact.partner_rows %}
         <table>
           <thead>
@@ -167,7 +168,7 @@
     </section>
 
     <section class="summary-card">
-      {{ ui.section_header("Alliance", "Opponent Pressure", "Opponents associated with the roughest observed margins against 7157B.") }}
+      {{ ui.section_header("Alliance", "Opponent Pressure", "Opponents associated with the roughest observed margins against the selected team.") }}
       {% if alliance_impact.opponent_rows %}
         <table>
           <thead>

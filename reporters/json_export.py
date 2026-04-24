@@ -17,6 +17,7 @@ def render_json_export(view: dict[str, Any]) -> dict[str, Any]:
         "previous_snapshot": view["previous_snapshot"],
         "official_delta": view["delta"],
         "team_power": view.get("team_power"),
+        "team_manual_note": view.get("team_manual_note"),
         "power_delta": view.get("power_delta"),
         "team_skill": view.get("team_skill"),
         "recent_completed_matches": view["recent_completed_matches"],

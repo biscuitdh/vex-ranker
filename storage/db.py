@@ -4,17 +4,22 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import math
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any, Iterator
+from uuid import uuid4
 import httpx
+import logging
 
 from storage.manual_notes_seed import COACH_SHEET_NOTES
 from utils.analysis import build_ai_rankings, build_analysis
 from utils.service_control import inspect_managed_services
+
+LOGGER = logging.getLogger(__name__)
 
 
 def utc_now() -> str:
@@ -49,6 +54,25 @@ def to_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
+def _truncate_payload(value: Any, *, max_string_length: int = 4000, max_list_items: int = 100) -> Any:
+    """Recursively trim oversized telemetry payloads before persisting to SQLite."""
+    if isinstance(value, dict):
+        return {str(key): _truncate_payload(item, max_string_length=max_string_length, max_list_items=max_list_items) for key, item in value.items()}
+    if isinstance(value, list):
+        trimmed = [_truncate_payload(item, max_string_length=max_string_length, max_list_items=max_list_items) for item in value[:max_list_items]]
+        if len(value) > max_list_items:
+            trimmed.append({"truncated": True, "omitted_items": len(value) - max_list_items})
+        return trimmed
+    if isinstance(value, tuple):
+        return [_truncate_payload(item, max_string_length=max_string_length, max_list_items=max_list_items) for item in value[:max_list_items]]
+    if isinstance(value, str):
+        if len(value) <= max_string_length:
+            return value
+        omitted = len(value) - max_string_length
+        return value[:max_string_length] + f"... [truncated {omitted} chars]"
+    return value
+
+
 @dataclass(slots=True)
 class MatchDelta:
     """Summary of focal team match changes from one write pass."""
@@ -59,9 +83,10 @@ class MatchDelta:
 
 def connect_db(db_path: Path) -> sqlite3.Connection:
     """Open the SQLite database with row access."""
-    connection = sqlite3.connect(db_path)
+    connection = sqlite3.connect(db_path, timeout=30)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA busy_timeout=30000")
     connection.execute("PRAGMA foreign_keys=ON")
     return connection
 
@@ -324,6 +349,41 @@ def init_db(connection: sqlite3.Connection) -> None:
             raw_json TEXT NOT NULL,
             FOREIGN KEY (healthcheck_run_id) REFERENCES healthcheck_runs(id) ON DELETE SET NULL
         );
+
+        CREATE TABLE IF NOT EXISTS discord_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            request_id TEXT NOT NULL UNIQUE,
+            category TEXT NOT NULL,
+            prompt_text TEXT NOT NULL,
+            allowed_actions_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            timeout_minutes INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            timeout_at TEXT NOT NULL,
+            discord_message_id TEXT,
+            response_text TEXT NOT NULL DEFAULT '',
+            response_source TEXT NOT NULL DEFAULT '',
+            last_operator_action TEXT NOT NULL DEFAULT '',
+            resolved_at TEXT,
+            raw_json TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS discord_replies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            request_id TEXT NOT NULL,
+            discord_user_id TEXT NOT NULL,
+            discord_message_id TEXT NOT NULL UNIQUE,
+            raw_text TEXT NOT NULL,
+            parsed_action TEXT NOT NULL,
+            answer_text TEXT NOT NULL DEFAULT '',
+            response_source TEXT NOT NULL DEFAULT 'text',
+            discord_interaction_id TEXT NOT NULL DEFAULT '',
+            interaction_custom_id TEXT NOT NULL DEFAULT '',
+            received_at TEXT NOT NULL,
+            raw_json TEXT NOT NULL,
+            FOREIGN KEY (request_id) REFERENCES discord_requests(request_id) ON DELETE CASCADE
+        );
         """
     )
 
@@ -339,6 +399,15 @@ def init_db(connection: sqlite3.Connection) -> None:
     _add_column_if_missing(connection, "derived_metrics_snapshots", "manual_scout_score", "REAL")
     _add_column_if_missing(connection, "derived_metrics_snapshots", "manual_scout_weight", "REAL")
     _add_column_if_missing(connection, "derived_metrics_snapshots", "manual_note_summary", "TEXT")
+    _add_column_if_missing(connection, "discord_requests", "discord_message_id", "TEXT")
+    _add_column_if_missing(connection, "discord_requests", "response_text", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(connection, "discord_requests", "response_source", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(connection, "discord_requests", "last_operator_action", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(connection, "discord_requests", "resolved_at", "TEXT")
+    _add_column_if_missing(connection, "discord_replies", "answer_text", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(connection, "discord_replies", "response_source", "TEXT NOT NULL DEFAULT 'text'")
+    _add_column_if_missing(connection, "discord_replies", "discord_interaction_id", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(connection, "discord_replies", "interaction_custom_id", "TEXT NOT NULL DEFAULT ''")
     _seed_manual_team_notes(connection)
 
 
@@ -349,10 +418,13 @@ def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
 
 def _seed_manual_team_notes(connection: sqlite3.Connection) -> None:
     """Persist the one-off coach sheet transcription for this project."""
+    existing_count = connection.execute("SELECT COUNT(*) AS count FROM manual_team_notes").fetchone()
+    if existing_count and int(existing_count["count"] or 0) >= len(COACH_SHEET_NOTES):
+        return
     for item in COACH_SHEET_NOTES:
         connection.execute(
             """
-            INSERT OR REPLACE INTO manual_team_notes (
+            INSERT OR IGNORE INTO manual_team_notes (
                 team_number, raw_note, circled_rank, blue_record_text, blue_wp,
                 skills_total_manual, region, comment_tags_json, source_label,
                 captured_at, confidence
@@ -775,7 +847,7 @@ def record_healthcheck_run(
             started_at, completed_at, status, reason_summary, raw_json
         ) VALUES (?, ?, ?, ?, ?)
         """,
-        (started_at, completed_at, status, reason_summary, to_json(payload)),
+        (started_at, completed_at, status, reason_summary, to_json(_truncate_payload(payload))),
     )
     return int(cursor.lastrowid)
 
@@ -798,7 +870,15 @@ def record_repair_attempt(
             healthcheck_run_id, attempt_number, started_at, completed_at, status, error_summary, raw_json
         ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (healthcheck_run_id, attempt_number, started_at, completed_at, status, error_summary, to_json(payload)),
+        (
+            healthcheck_run_id,
+            attempt_number,
+            started_at,
+            completed_at,
+            status,
+            error_summary,
+            to_json(_truncate_payload(payload)),
+        ),
     )
     return int(cursor.lastrowid)
 
@@ -821,9 +901,309 @@ def record_restart_event(
             healthcheck_run_id, requested_at, completed_at, status, reason_summary, targets_json, raw_json
         ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (healthcheck_run_id, requested_at, completed_at, status, reason_summary, to_json(targets), to_json(payload)),
+        (
+            healthcheck_run_id,
+            requested_at,
+            completed_at,
+            status,
+            reason_summary,
+            to_json(_truncate_payload(targets)),
+            to_json(_truncate_payload(payload)),
+        ),
     )
     return int(cursor.lastrowid)
+
+
+def _hydrate_discord_request(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    """Convert a Discord request row into a plain dictionary."""
+    request = row_to_dict(row)
+    if not request:
+        return None
+    try:
+        request["allowed_actions"] = json.loads(str(request.get("allowed_actions_json") or "[]"))
+    except json.JSONDecodeError:
+        request["allowed_actions"] = []
+    raw_value = request.get("raw_json")
+    if raw_value not in (None, ""):
+        try:
+            request["payload"] = json.loads(str(raw_value))
+        except json.JSONDecodeError:
+            request["payload"] = {}
+    else:
+        request["payload"] = {}
+    return request
+
+
+def _hydrate_discord_reply(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    """Convert a Discord reply row into a plain dictionary."""
+    reply = row_to_dict(row)
+    if not reply:
+        return None
+    raw_value = reply.get("raw_json")
+    if raw_value not in (None, ""):
+        try:
+            reply["payload"] = json.loads(str(raw_value))
+        except json.JSONDecodeError:
+            reply["payload"] = {}
+    else:
+        reply["payload"] = {}
+    return reply
+
+
+def create_discord_request(
+    connection: sqlite3.Connection,
+    category: str,
+    prompt: str,
+    allowed_actions: list[str],
+    timeout_minutes: int,
+) -> dict[str, Any]:
+    """Persist one outbound Discord request and return it."""
+    created_at = utc_now()
+    timeout_at = (parse_timestamp(created_at) or datetime.now(timezone.utc)) + timedelta(minutes=max(1, timeout_minutes))
+    request_id = f"drq-{uuid4().hex[:8]}"
+    payload = {
+        "request_id": request_id,
+        "category": category,
+        "prompt_text": prompt,
+        "allowed_actions": allowed_actions,
+        "created_at": created_at,
+        "timeout_minutes": max(1, timeout_minutes),
+        "timeout_at": timeout_at.isoformat(),
+    }
+    connection.execute(
+        """
+        INSERT INTO discord_requests (
+            request_id, category, prompt_text, allowed_actions_json, status,
+            timeout_minutes, created_at, updated_at, timeout_at, discord_message_id,
+            response_text, response_source, last_operator_action, resolved_at, raw_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            request_id,
+            category,
+            prompt,
+            to_json(allowed_actions),
+            "pending",
+            max(1, timeout_minutes),
+            created_at,
+            created_at,
+            timeout_at.isoformat(),
+            None,
+            "",
+            "",
+            "",
+            None,
+            to_json(payload),
+        ),
+    )
+    return get_discord_request_by_request_id(connection, request_id) or payload
+
+
+def get_discord_request_by_request_id(connection: sqlite3.Connection, request_id: str) -> dict[str, Any] | None:
+    """Return one Discord request by its public request id."""
+    row = connection.execute(
+        "SELECT * FROM discord_requests WHERE request_id = ? LIMIT 1",
+        (request_id,),
+    ).fetchone()
+    return _hydrate_discord_request(row)
+
+
+def get_latest_discord_request(connection: sqlite3.Connection) -> dict[str, Any] | None:
+    """Return the newest Discord request."""
+    row = connection.execute(
+        "SELECT * FROM discord_requests ORDER BY created_at DESC, id DESC LIMIT 1"
+    ).fetchone()
+    return _hydrate_discord_request(row)
+
+
+def get_latest_discord_reply(connection: sqlite3.Connection) -> dict[str, Any] | None:
+    """Return the newest Discord reply."""
+    row = connection.execute(
+        "SELECT * FROM discord_replies ORDER BY received_at DESC, id DESC LIMIT 1"
+    ).fetchone()
+    return _hydrate_discord_reply(row)
+
+
+def poll_discord_request_status(connection: sqlite3.Connection, request_id: str) -> dict[str, Any] | None:
+    """Return the current persisted status for one Discord request."""
+    return get_discord_request_by_request_id(connection, request_id)
+
+
+def mark_discord_request_posted(
+    connection: sqlite3.Connection,
+    request_id: str,
+    discord_message_id: str,
+) -> dict[str, Any] | None:
+    """Attach the posted Discord message id to a request."""
+    updated_at = utc_now()
+    request = get_discord_request_by_request_id(connection, request_id)
+    if not request:
+        return None
+    payload = dict(request.get("payload") or {})
+    payload["discord_message_id"] = discord_message_id
+    connection.execute(
+        """
+        UPDATE discord_requests
+        SET discord_message_id = ?, updated_at = ?, raw_json = ?
+        WHERE request_id = ?
+        """,
+        (discord_message_id, updated_at, to_json(payload), request_id),
+    )
+    return get_discord_request_by_request_id(connection, request_id)
+
+
+def update_discord_request_status(
+    connection: sqlite3.Connection,
+    request_id: str,
+    status: str,
+    *,
+    response_text: str = "",
+    response_source: str = "",
+    operator_action: str = "",
+    resolved_at: str | None = None,
+    extra_payload: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Update a Discord request status and persisted payload."""
+    updated_at = utc_now()
+    request = get_discord_request_by_request_id(connection, request_id)
+    if not request:
+        return None
+    payload = dict(request.get("payload") or {})
+    payload.update(extra_payload or {})
+    payload["status"] = status
+    if response_text:
+        payload["response_text"] = response_text
+    if response_source:
+        payload["response_source"] = response_source
+    if operator_action:
+        payload["last_operator_action"] = operator_action
+    final_resolved_at = resolved_at if status in {"approved", "denied", "answered", "expired"} else None
+    if final_resolved_at:
+        payload["resolved_at"] = final_resolved_at
+    connection.execute(
+        """
+        UPDATE discord_requests
+        SET status = ?, response_text = ?, response_source = ?, last_operator_action = ?,
+            resolved_at = ?, updated_at = ?, raw_json = ?
+        WHERE request_id = ?
+        """,
+        (
+            status,
+            response_text,
+            response_source,
+            operator_action,
+            final_resolved_at,
+            updated_at,
+            to_json(payload),
+            request_id,
+        ),
+    )
+    return get_discord_request_by_request_id(connection, request_id)
+
+
+def apply_discord_reply(
+    connection: sqlite3.Connection,
+    reply_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist one trusted Discord reply when it targets a pending request."""
+    discord_message_id = str(reply_payload.get("discord_message_id") or "").strip()
+    if not discord_message_id:
+        return {"accepted": False, "reason": "missing_message_id"}
+    existing_reply = connection.execute(
+        "SELECT * FROM discord_replies WHERE discord_message_id = ? LIMIT 1",
+        (discord_message_id,),
+    ).fetchone()
+    if existing_reply is not None:
+        return {"accepted": False, "reason": "duplicate_message"}
+
+    request_id = str(reply_payload.get("request_id") or "").strip()
+    request = get_discord_request_by_request_id(connection, request_id)
+    if not request:
+        return {"accepted": False, "reason": "unknown_request"}
+    if str(request.get("status") or "").lower() != "pending":
+        return {"accepted": False, "reason": "request_not_pending", "request": request}
+
+    parsed_action = str(reply_payload.get("parsed_action") or "").strip().lower()
+    if parsed_action not in {"approve", "deny", "answer", "need_info"}:
+        return {"accepted": False, "reason": "invalid_action", "request": request}
+    answer_text = str(reply_payload.get("answer_text") or "").strip()
+    response_source = str(reply_payload.get("response_source") or "text").strip().lower() or "text"
+    received_at = str(reply_payload.get("received_at") or utc_now())
+    connection.execute(
+        """
+        INSERT INTO discord_replies (
+            request_id, discord_user_id, discord_message_id, raw_text,
+            parsed_action, answer_text, response_source, discord_interaction_id,
+            interaction_custom_id, received_at, raw_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            request_id,
+            str(reply_payload.get("discord_user_id") or ""),
+            discord_message_id,
+            str(reply_payload.get("raw_text") or ""),
+            parsed_action,
+            answer_text,
+            response_source,
+            str(reply_payload.get("discord_interaction_id") or ""),
+            str(reply_payload.get("interaction_custom_id") or ""),
+            received_at,
+            to_json(reply_payload.get("raw_payload") or reply_payload),
+        ),
+    )
+    final_status = {"approve": "approved", "deny": "denied", "answer": "answered", "need_info": "answered"}[parsed_action]
+    if parsed_action == "need_info" and not answer_text:
+        answer_text = "Operator requested more information before approving the action."
+    updated_request = update_discord_request_status(
+        connection,
+        request_id,
+        final_status,
+        response_text=answer_text,
+        response_source=response_source,
+        operator_action=parsed_action,
+        resolved_at=received_at,
+        extra_payload={
+            "resolved_by_user_id": str(reply_payload.get("discord_user_id") or ""),
+            "resolved_via_message_id": discord_message_id,
+            "resolved_action": parsed_action,
+            "response_source": response_source,
+            "discord_interaction_id": str(reply_payload.get("discord_interaction_id") or ""),
+            "interaction_custom_id": str(reply_payload.get("interaction_custom_id") or ""),
+        },
+    )
+    return {"accepted": True, "status": final_status, "request": updated_request}
+
+
+def expire_pending_discord_requests(
+    connection: sqlite3.Connection,
+    *,
+    now: str | None = None,
+) -> list[dict[str, Any]]:
+    """Expire pending Discord requests that have timed out."""
+    current_time = now or utc_now()
+    rows = connection.execute(
+        """
+        SELECT request_id
+        FROM discord_requests
+        WHERE status = 'pending' AND timeout_at <= ?
+        ORDER BY timeout_at ASC, id ASC
+        """,
+        (current_time,),
+    ).fetchall()
+    expired: list[dict[str, Any]] = []
+    for row in rows:
+        request = update_discord_request_status(
+            connection,
+            str(row["request_id"]),
+            "expired",
+            response_text="Timed out waiting for a Discord reply.",
+            response_source="timeout",
+            operator_action="timeout",
+            resolved_at=current_time,
+        )
+        if request:
+            expired.append(request)
+    return expired
 
 
 def get_latest_ai_rankings(connection: sqlite3.Connection, team_number: str = "7157B") -> dict[str, Any] | None:
@@ -856,32 +1236,140 @@ def get_latest_ai_rankings_generated_at(connection: sqlite3.Connection, team_num
     return str(row["generated_at"]) if row and row["generated_at"] not in (None, "") else None
 
 
-def get_latest_snapshot(connection: sqlite3.Connection) -> dict[str, Any] | None:
-    """Return the latest focal team competition snapshot."""
+def _hydrate_snapshot_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    """Hydrate a snapshot-like row from either focal snapshots or division standings."""
+    if row is None:
+        return None
+    row_dict = dict(row)
+    try:
+        raw = json.loads(str(row_dict.get("raw_json") or "{}"))
+    except json.JSONDecodeError:
+        raw = {}
+    fetched_at = row_dict.get("fetched_at") or row_dict.get("snapshot_at")
+    return {
+        "event_sku": row_dict.get("event_sku"),
+        "event_name": row_dict.get("event_name") or raw.get("event_name") or row_dict.get("event_sku"),
+        "division_name": row_dict.get("division_name"),
+        "team_number": row_dict.get("team_number"),
+        "team_name": row_dict.get("team_name"),
+        "school_name": row_dict.get("school_name") or row_dict.get("organization") or raw.get("organization"),
+        "rank": row_dict.get("rank"),
+        "wins": row_dict.get("wins"),
+        "losses": row_dict.get("losses"),
+        "ties": row_dict.get("ties"),
+        "wp": row_dict.get("wp"),
+        "ap": row_dict.get("ap"),
+        "sp": row_dict.get("sp"),
+        "average_score": row_dict.get("average_score"),
+        "record_text": row_dict.get("record_text"),
+        "source": row_dict.get("source") or raw.get("source"),
+        "fetched_at": fetched_at,
+        "raw_json": row_dict.get("raw_json"),
+    }
+
+
+def get_latest_snapshot(connection: sqlite3.Connection, team_number: str = "7157B") -> dict[str, Any] | None:
+    """Return the latest standings snapshot for one team."""
     row = connection.execute(
-        "SELECT * FROM competition_snapshots ORDER BY fetched_at DESC, id DESC LIMIT 1"
+        """
+        SELECT
+            event_sku,
+            division_name,
+            team_number,
+            team_name,
+            organization,
+            rank,
+            wins,
+            losses,
+            ties,
+            wp,
+            ap,
+            sp,
+            average_score,
+            record_text,
+            snapshot_at,
+            raw_json
+        FROM division_rankings_snapshots
+        WHERE team_number = ?
+        ORDER BY snapshot_at DESC, id DESC
+        LIMIT 1
+        """,
+        (team_number,),
     ).fetchone()
-    return row_to_dict(row)
-
-
-def get_previous_snapshot(connection: sqlite3.Connection) -> dict[str, Any] | None:
-    """Return the snapshot before the latest focal team snapshot."""
+    if row is not None:
+        return _hydrate_snapshot_row(row)
     row = connection.execute(
-        "SELECT * FROM competition_snapshots ORDER BY fetched_at DESC, id DESC LIMIT 1 OFFSET 1"
+        """
+        SELECT *
+        FROM competition_snapshots
+        WHERE team_number = ?
+        ORDER BY fetched_at DESC, id DESC
+        LIMIT 1
+        """,
+        (team_number,),
     ).fetchone()
-    return row_to_dict(row)
+    return _hydrate_snapshot_row(row)
 
 
-def get_recent_matches(connection: sqlite3.Connection, *, status: str, limit: int = 10) -> list[dict[str, Any]]:
+def get_previous_snapshot(connection: sqlite3.Connection, team_number: str = "7157B") -> dict[str, Any] | None:
+    """Return the snapshot before the latest snapshot for one team."""
+    row = connection.execute(
+        """
+        SELECT
+            event_sku,
+            division_name,
+            team_number,
+            team_name,
+            organization,
+            rank,
+            wins,
+            losses,
+            ties,
+            wp,
+            ap,
+            sp,
+            average_score,
+            record_text,
+            snapshot_at,
+            raw_json
+        FROM division_rankings_snapshots
+        WHERE team_number = ?
+        ORDER BY snapshot_at DESC, id DESC
+        LIMIT 1 OFFSET 1
+        """,
+        (team_number,),
+    ).fetchone()
+    if row is not None:
+        return _hydrate_snapshot_row(row)
+    row = connection.execute(
+        """
+        SELECT *
+        FROM competition_snapshots
+        WHERE team_number = ?
+        ORDER BY fetched_at DESC, id DESC
+        LIMIT 1 OFFSET 1
+        """,
+        (team_number,),
+    ).fetchone()
+    return _hydrate_snapshot_row(row)
+
+
+def get_recent_matches(
+    connection: sqlite3.Connection,
+    *,
+    team_number: str = "7157B",
+    status: str,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
     """Return recent focal team match rows filtered by status."""
     rows = connection.execute(
         """
         SELECT * FROM matches
-        WHERE status = ?
+        WHERE team_number = ? AND status = ?
         ORDER BY COALESCE(completed_time, scheduled_time, updated_at) DESC
         LIMIT ?
         """,
-        (status, limit),
+        (team_number, status, limit),
     ).fetchall()
     hydrated: list[dict[str, Any]] = []
     for row in rows:
@@ -1098,10 +1586,11 @@ def get_match_intelligence(connection: sqlite3.Connection, team_number: str = "7
         """
         SELECT *
         FROM matches
-        WHERE status = 'completed'
+        WHERE team_number = ? AND status = 'completed'
         ORDER BY COALESCE(completed_time, updated_at) DESC, id DESC
         LIMIT 1
-        """
+        """,
+        (team_number,),
     ).fetchone()
     if last_match is None:
         last_match = _fallback_match_from_division(
@@ -1307,7 +1796,7 @@ def get_alliance_impact(connection: sqlite3.Connection, team_number: str, limit:
 
 def get_swing_matches(connection: sqlite3.Connection, team_number: str, limit: int = 6) -> list[dict[str, Any]]:
     """Return upcoming matches most likely to affect the focal team's trajectory."""
-    focal_snapshot = get_latest_snapshot(connection)
+    focal_snapshot = get_latest_snapshot(connection, team_number)
     focal_power = get_latest_team_power(connection, team_number)
     if not focal_snapshot:
         return []
@@ -1316,10 +1805,10 @@ def get_swing_matches(connection: sqlite3.Connection, team_number: str, limit: i
     rankings_map = _latest_rankings_map(connection)
     power_map = _latest_power_map(connection)
     skills_map = _latest_skills_map(connection)
-    rows = get_recent_matches(connection, status="scheduled", limit=20)
+    rows = get_upcoming_matchups(connection, team_number=team_number, limit=20)
     swing_rows: list[dict[str, Any]] = []
     for row in rows:
-        enriched = _enrich_match_row(row, rankings_map, power_map, skills_map)
+        enriched = row if row.get("opponent_rows") is not None else _enrich_match_row(row, rankings_map, power_map, skills_map)
         if not enriched:
             continue
         official_values = [
@@ -1373,13 +1862,47 @@ def get_recent_media(connection: sqlite3.Connection, limit: int = 25) -> list[di
     return [dict(row) for row in rows]
 
 
-def get_snapshot_history(connection: sqlite3.Connection, limit: int = 25) -> list[dict[str, Any]]:
-    """Return recent focal team competition snapshots."""
+def get_snapshot_history(connection: sqlite3.Connection, team_number: str = "7157B", limit: int = 25) -> list[dict[str, Any]]:
+    """Return recent team standings snapshots."""
     rows = connection.execute(
-        "SELECT * FROM competition_snapshots ORDER BY fetched_at DESC, id DESC LIMIT ?",
-        (limit,),
+        """
+        SELECT
+            event_sku,
+            division_name,
+            team_number,
+            team_name,
+            organization,
+            rank,
+            wins,
+            losses,
+            ties,
+            wp,
+            ap,
+            sp,
+            average_score,
+            record_text,
+            snapshot_at,
+            raw_json
+        FROM division_rankings_snapshots
+        WHERE team_number = ?
+        ORDER BY snapshot_at DESC, id DESC
+        LIMIT ?
+        """,
+        (team_number, limit),
     ).fetchall()
-    return [dict(row) for row in rows]
+    if rows:
+        return [_hydrate_snapshot_row(row) for row in rows if _hydrate_snapshot_row(row)]
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM competition_snapshots
+        WHERE team_number = ?
+        ORDER BY fetched_at DESC, id DESC
+        LIMIT ?
+        """,
+        (team_number, limit),
+    ).fetchall()
+    return [_hydrate_snapshot_row(row) for row in rows if _hydrate_snapshot_row(row)]
 
 
 def _build_sparkline(values: list[float]) -> dict[str, Any]:
@@ -1456,6 +1979,20 @@ def get_latest_restart_event(connection: sqlite3.Connection) -> dict[str, Any] |
     return row_to_dict(row)
 
 
+def get_pending_discord_requests(connection: sqlite3.Connection, limit: int = 10) -> list[dict[str, Any]]:
+    """Return the newest pending Discord requests."""
+    rows = connection.execute(
+        """
+        SELECT * FROM discord_requests
+        WHERE status = 'pending'
+        ORDER BY created_at DESC, id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    return [item for item in (_hydrate_discord_request(row) for row in rows) if item]
+
+
 def get_latest_rankings_collector_run(connection: sqlite3.Connection) -> dict[str, Any] | None:
     """Return the newest rankings-relevant collector run."""
     row = connection.execute(
@@ -1517,6 +2054,48 @@ def get_latest_division_rankings(connection: sqlite3.Connection, limit: int = 50
         (snapshot_at, limit),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def get_available_teams(
+    connection: sqlite3.Connection,
+    default_team_number: str = "7157B",
+    limit: int = 250,
+) -> list[dict[str, Any]]:
+    """Return the currently available event/division teams for team lookup."""
+    rankings = get_latest_division_rankings(connection, limit=limit)
+    teams: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in rankings:
+        team_number = str(item.get("team_number") or "").strip()
+        if not team_number or team_number in seen:
+            continue
+        seen.add(team_number)
+        teams.append(
+            {
+                "team_number": team_number,
+                "team_name": item.get("team_name"),
+                "organization": item.get("organization"),
+                "official_rank": item.get("rank"),
+            }
+        )
+    if default_team_number not in seen:
+        teams.insert(
+            0,
+            {
+                "team_number": default_team_number,
+                "team_name": None,
+                "organization": None,
+                "official_rank": None,
+            },
+        )
+    teams.sort(
+        key=lambda item: (
+            item.get("official_rank") is None,
+            item.get("official_rank") if item.get("official_rank") is not None else 999999,
+            item.get("team_number") or "",
+        )
+    )
+    return teams
 
 
 def get_latest_division_snapshot_source(connection: sqlite3.Connection) -> str | None:
@@ -2300,13 +2879,26 @@ def _published_surface_health(connection: sqlite3.Connection, settings: Any) -> 
 
 def _notification_path_health(settings: Any) -> dict[str, Any]:
     """Return Discord notification-path health."""
+    from notify.discord_bridge import discord_bridge_configured, discord_bridge_missing_fields, discord_webhook_valid
+
     checked_at = utc_now()
     details: dict[str, Any] = {}
     if not settings.discord_webhook_url:
+        if not discord_bridge_configured(settings):
+            details["bridge_missing_fields"] = discord_bridge_missing_fields(settings)
         return _component_payload(
             name="notification_path",
             status="degraded",
             summary="Discord webhook is not configured.",
+            checked_at=checked_at,
+            details=details,
+        )
+    if not discord_webhook_valid(settings):
+        details["webhook_url"] = settings.discord_webhook_url
+        return _component_payload(
+            name="notification_path",
+            status="degraded",
+            summary="Discord webhook URL appears invalid.",
             checked_at=checked_at,
             details=details,
         )
@@ -2316,6 +2908,8 @@ def _notification_path_health(settings: Any) -> dict[str, Any]:
         with httpx.Client(timeout=timeout) as client:
             response = client.get(settings.discord_webhook_url)
         details["status_code"] = response.status_code
+        if not discord_bridge_configured(settings):
+            details["bridge_missing_fields"] = discord_bridge_missing_fields(settings)
         if response.status_code >= 400:
             return _component_payload(
                 name="notification_path",
@@ -2324,10 +2918,18 @@ def _notification_path_health(settings: Any) -> dict[str, Any]:
                 checked_at=checked_at,
                 details=details,
             )
+        if not discord_bridge_configured(settings):
+            return _component_payload(
+                name="notification_path",
+                status="degraded",
+                summary="Discord webhook responded, but the interactive Discord bridge is not fully configured.",
+                checked_at=checked_at,
+                details=details,
+            )
         return _component_payload(
             name="notification_path",
             status="healthy",
-            summary="Discord webhook responded to the health probe.",
+            summary="Discord webhook and interactive bridge configuration look healthy.",
             checked_at=checked_at,
             details=details,
         )
@@ -2362,6 +2964,8 @@ def _service_supervision_health(settings: Any) -> dict[str, Any]:
 
 def evaluate_dashboard_health(connection: sqlite3.Connection, settings: Any) -> dict[str, Any]:
     """Evaluate operator-facing dashboard health from freshness and collector telemetry."""
+    started_at = time.monotonic()
+    LOGGER.info("Evaluating dashboard health", extra={"team": getattr(settings, "team_number", ""), "event": getattr(settings, "event_sku", "")})
     rankings_status = get_rankings_status(connection)
     latest_snapshot = get_latest_snapshot(connection)
     ai_rankings = get_latest_ai_rankings(connection, settings.team_number)
@@ -2388,9 +2992,13 @@ def evaluate_dashboard_health(connection: sqlite3.Connection, settings: Any) -> 
     freshness["current_record_text"] = match_progress_details.get("current_record_text", "")
     freshness["previous_next_match"] = match_progress_details.get("previous_next_match") or {}
     freshness["current_next_match"] = match_progress_details.get("current_next_match") or {}
+    gui_started_at = time.monotonic()
     gui_surface = _gui_surface_health(settings)
+    published_started_at = time.monotonic()
     published_surface = _published_surface_health(connection, settings)
+    notification_started_at = time.monotonic()
     notification_path = _notification_path_health(settings)
+    service_started_at = time.monotonic()
     service_supervision = _service_supervision_health(settings)
     components = {
         "data_pipeline": data_pipeline,
@@ -2413,7 +3021,7 @@ def evaluate_dashboard_health(connection: sqlite3.Connection, settings: Any) -> 
     else:
         status = "healthy"
 
-    return {
+    payload = {
         "status": status,
         "healthy": status == "healthy",
         "reason_summary": "; ".join((reasons or warnings)[:4]) if (reasons or warnings) else "Dashboard health is within configured thresholds.",
@@ -2432,6 +3040,19 @@ def evaluate_dashboard_health(connection: sqlite3.Connection, settings: Any) -> 
         "last_repair_attempt": latest_repair_attempt,
         "last_restart_event": latest_restart_event,
     }
+    LOGGER.info(
+        "Dashboard health evaluation complete",
+        extra={
+            "status": status,
+            "team": getattr(settings, "team_number", ""),
+            "elapsed_ms": round((time.monotonic() - started_at) * 1000, 2),
+            "gui_ms": round((published_started_at - gui_started_at) * 1000, 2),
+            "published_ms": round((notification_started_at - published_started_at) * 1000, 2),
+            "notification_ms": round((service_started_at - notification_started_at) * 1000, 2),
+            "service_ms": round((time.monotonic() - service_started_at) * 1000, 2),
+        },
+    )
+    return payload
 
 
 def compute_rank_delta(latest: dict[str, Any] | None, previous: dict[str, Any] | None) -> dict[str, Any]:
@@ -2802,18 +3423,20 @@ def build_dashboard_view(
     connection: sqlite3.Connection,
     team_number: str = "7157B",
     settings: Any | None = None,
+    *,
+    include_operations: bool = True,
 ) -> dict[str, Any]:
     """Collect the current database state for reporting and the GUI."""
     if settings is None:
         from config import load_settings
 
         settings = load_settings(env_file=None)
-    latest = get_latest_snapshot(connection)
-    previous = get_previous_snapshot(connection)
-    recent_completed = get_recent_matches(connection, status="completed", limit=10)
-    upcoming = get_recent_matches(connection, status="scheduled", limit=10)
+    latest = get_latest_snapshot(connection, team_number)
+    previous = get_previous_snapshot(connection, team_number)
+    recent_completed = get_recent_matches(connection, team_number=team_number, status="completed", limit=10)
+    upcoming = get_recent_matches(connection, team_number=team_number, status="scheduled", limit=10)
     media = get_recent_media(connection, limit=25)
-    snapshots = get_snapshot_history(connection, limit=25)
+    snapshots = get_snapshot_history(connection, team_number=team_number, limit=25)
     collector_runs = get_collector_history(connection, limit=25)
     latest_delta = compute_rank_delta(latest, previous)
     division_rankings = get_latest_division_rankings(connection, limit=200)
@@ -2833,11 +3456,21 @@ def build_dashboard_view(
     upcoming_matchups = get_upcoming_matchups(connection, team_number, limit=5)
     matchup_summary = _build_matchup_summary(upcoming_matchups)
     rankings_status = get_rankings_status(connection)
-    dashboard_health = evaluate_dashboard_health(connection, settings)
-    last_healthcheck = _hydrate_telemetry_row(get_latest_healthcheck_run(connection))
-    last_repair_attempt = _hydrate_telemetry_row(get_latest_repair_attempt(connection))
-    last_restart_event = _hydrate_telemetry_row(get_latest_restart_event(connection))
+    dashboard_health = evaluate_dashboard_health(connection, settings) if include_operations else {}
+    last_healthcheck = _hydrate_telemetry_row(get_latest_healthcheck_run(connection)) if include_operations else None
+    last_repair_attempt = _hydrate_telemetry_row(get_latest_repair_attempt(connection)) if include_operations else None
+    last_restart_event = _hydrate_telemetry_row(get_latest_restart_event(connection)) if include_operations else None
+    last_discord_request = get_latest_discord_request(connection) if include_operations else None
+    last_discord_reply = get_latest_discord_reply(connection) if include_operations else None
+    pending_discord_requests = get_pending_discord_requests(connection, limit=5) if include_operations else []
+    available_teams = get_available_teams(connection, team_number, limit=250)
     base_view = {
+        "selected_team_number": team_number,
+        "selected_team_entry": next(
+            (item for item in available_teams if str(item.get("team_number")) == str(team_number)),
+            {"team_number": team_number},
+        ),
+        "available_teams": available_teams,
         "latest_snapshot": latest,
         "previous_snapshot": previous,
         "recent_completed_matches": recent_completed,
@@ -2867,6 +3500,9 @@ def build_dashboard_view(
         "last_healthcheck": last_healthcheck,
         "last_repair_attempt": last_repair_attempt,
         "last_restart_event": last_restart_event,
+        "last_discord_request": last_discord_request,
+        "last_discord_reply": last_discord_reply,
+        "pending_discord_requests": pending_discord_requests,
     }
     analysis = build_analysis(base_view)
     base_view["analysis"] = analysis
@@ -2888,7 +3524,7 @@ def _build_matchup_summary(upcoming_matchups: list[dict[str, Any]]) -> dict[str,
     if not upcoming_matchups:
         return {
             "count": 0,
-            "headline": "No known upcoming 7157B matchups are available in the local cache.",
+            "headline": "No known upcoming matchups are available in the local cache.",
         }
     next_item = upcoming_matchups[0]
     opponents = ", ".join(next_item.get("opponent_teams") or ["TBD"])

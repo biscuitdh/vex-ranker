@@ -2,6 +2,7 @@
 {% import "gui_primitives.html.j2" as ui %}
 {% set page_title = "Rankings" %}
 {% block content %}
+  {% set team_label = selected_team_number or (latest_snapshot.team_number if latest_snapshot else settings.team_number) %}
   {% set status = rankings_status if rankings_status is defined else {
     "rankings_count": 0,
     "skills_count": 0,
@@ -14,25 +15,27 @@
     "empty_reason": "No rankings data has been collected yet.",
     "latest_rankings_snapshot_at": none
   } %}
+  {% set threat_base = ('/rankings' ~ team_query) if (not static_site and team_query) else ('/rankings' if not static_site else './' ~ team_query) %}
+  {% set threat_joiner = '&' if team_query else '?' %}
   {% set current_threat_sort = threat_sort if threat_sort is defined else "threat_score" %}
   {% set current_threat_dir = threat_dir if threat_dir is defined else "desc" %}
   {% call ui.page_intro("Rankings", "Official Standings And Power Rankings", "Official division standings, skills results, and our own computed ranking model live together here without pretending they are the same thing.") %}
-    <a class="header-action" href="{{ '/' if not static_site else '../index.html' }}">Back To Dashboard</a>
+    <a class="header-action" href="{{ ('/' ~ team_query) if not static_site and team_query else ('/' if not static_site else '../index.html' ~ team_query) }}">Back To Dashboard</a>
     <a class="header-action" href="{{ settings.livestream_url }}" target="_blank" rel="noopener noreferrer">Open Livestream</a>
     {% if not static_site %}
-      <form method="post" action="/actions/refresh-rankings">
+      <form method="post" action="/actions/refresh-rankings{% if team_query %}{{ team_query }}{% endif %}">
         <button type="submit" class="header-action">Refresh Rankings</button>
       </form>
-      <form method="post" action="/actions/run-now">
+      <form method="post" action="/actions/run-now{% if team_query %}{{ team_query }}{% endif %}">
         <button type="submit" class="header-action">Refresh Full Data</button>
       </form>
     {% endif %}
   {% endcall %}
 
   {{ ui.metric_grid([
-    {"label": "7157B Official", "value": latest_snapshot.rank if latest_snapshot else "N/A"},
-    {"label": "7157B Power", "value": team_power.power_rank if team_power else "N/A"},
-    {"label": "7157B Skills", "value": team_skill.total_score if team_skill else "N/A"},
+    {"label": team_label ~ " Official", "value": latest_snapshot.rank if latest_snapshot else "N/A"},
+    {"label": team_label ~ " Power", "value": team_power.power_rank if team_power else "N/A"},
+    {"label": team_label ~ " Skills", "value": team_skill.total_score if team_skill else "N/A"},
     {"label": "Teams Ranked", "value": status.rankings_count},
     {"label": "Movers Tracked", "value": biggest_movers|length},
   ]) }}
@@ -77,11 +80,11 @@
         </section>
 
         <section class="summary-card">
-          {{ ui.section_header("Spotlight", "Team 7157B", "Primary focus stays on the team while the rest of the division provides context.") }}
+          {{ ui.section_header("Spotlight", "Team " ~ team_label, "Primary focus stays on the selected team while the rest of the division provides context.") }}
           {% if latest_snapshot %}
             <table>
               <thead>
-                <tr><th>Team</th><th>Official Rank</th><th>Power Rank</th><th>Record</th><th>Skills</th><th>OPR</th><th>DPR</th><th>CCWM</th></tr>
+                <tr><th>Team</th><th>Official Rank</th><th>Power Rank</th><th>Record</th><th>Skills</th><th>OPR</th><th>DPR</th><th>CCWM</th><th>Coach</th></tr>
               </thead>
               <tbody>
                 <tr>
@@ -93,9 +96,19 @@
                   <td>{{ team_power.opr if team_power else "N/A" }}</td>
                   <td>{{ team_power.dpr if team_power else "N/A" }}</td>
                   <td>{{ team_power.ccwm if team_power else "N/A" }}</td>
+                  <td>
+                    {% if team_power and team_power.manual_scout_score is not none %}
+                      {{ team_power.manual_scout_score }} @ {{ team_power.manual_scout_weight }}
+                    {% else %}
+                      N/A
+                    {% endif %}
+                  </td>
                 </tr>
               </tbody>
             </table>
+            {% if team_power and team_power.manual_note_summary %}
+              <div class="muted-panel small" style="margin-top: 12px;">Coach note: {{ team_power.manual_note_summary }}</div>
+            {% endif %}
           {% else %}
             <div class="muted-panel">No focal team standings yet.</div>
           {% endif %}
@@ -159,22 +172,23 @@
 
         <div class="split">
           <section class="summary-card">
-            {{ ui.section_header("Scout", "Threat List", "Teams currently most relevant to 7157B based on nearby official rank, nearby power rank, skills, and scoring profile.") }}
+            {{ ui.section_header("Scout", "Threat List", "Teams currently most relevant to the selected team based on nearby official rank, nearby power rank, skills, and scoring profile.") }}
             {% if threat_list %}
               <table>
                 <thead>
                   <tr>
-                    <th><a class="sort-link" href="{{ '/rankings' if not static_site else './' }}?threat_sort=team_number&threat_dir={{ next_threat_dir('team_number', 'asc') }}">Team{% if current_threat_sort == 'team_number' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+                    <th><a class="sort-link" href="{{ threat_base }}{{ threat_joiner }}threat_sort=team_number&threat_dir={{ next_threat_dir('team_number', 'asc') }}">Team{% if current_threat_sort == 'team_number' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
                     <th>Official</th>
                     <th>Power</th>
                     <th>Record</th>
                     <th>Skills</th>
                     <th>OPR</th>
-                    <th><a class="sort-link" href="{{ '/rankings' if not static_site else './' }}?threat_sort=threat_score&threat_dir={{ next_threat_dir('threat_score', 'desc') }}">Threat{% if current_threat_sort == 'threat_score' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
-                    <th><a class="sort-link" href="{{ '/rankings' if not static_site else './' }}?threat_sort=official_pressure&threat_dir={{ next_threat_dir('official_pressure', 'desc') }}">Official{% if current_threat_sort == 'official_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
-                    <th><a class="sort-link" href="{{ '/rankings' if not static_site else './' }}?threat_sort=power_pressure&threat_dir={{ next_threat_dir('power_pressure', 'desc') }}">Power{% if current_threat_sort == 'power_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
-                    <th><a class="sort-link" href="{{ '/rankings' if not static_site else './' }}?threat_sort=skills_pressure&threat_dir={{ next_threat_dir('skills_pressure', 'desc') }}">Skills{% if current_threat_sort == 'skills_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
-                    <th><a class="sort-link" href="{{ '/rankings' if not static_site else './' }}?threat_sort=scoring_pressure&threat_dir={{ next_threat_dir('scoring_pressure', 'desc') }}">Scoring{% if current_threat_sort == 'scoring_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+                    <th><a class="sort-link" href="{{ threat_base }}{{ threat_joiner }}threat_sort=threat_score&threat_dir={{ next_threat_dir('threat_score', 'desc') }}">Threat{% if current_threat_sort == 'threat_score' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+                    <th><a class="sort-link" href="{{ threat_base }}{{ threat_joiner }}threat_sort=official_pressure&threat_dir={{ next_threat_dir('official_pressure', 'desc') }}">Official{% if current_threat_sort == 'official_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+                    <th><a class="sort-link" href="{{ threat_base }}{{ threat_joiner }}threat_sort=power_pressure&threat_dir={{ next_threat_dir('power_pressure', 'desc') }}">Power{% if current_threat_sort == 'power_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+                    <th><a class="sort-link" href="{{ threat_base }}{{ threat_joiner }}threat_sort=skills_pressure&threat_dir={{ next_threat_dir('skills_pressure', 'desc') }}">Skills{% if current_threat_sort == 'skills_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+                    <th><a class="sort-link" href="{{ threat_base }}{{ threat_joiner }}threat_sort=scoring_pressure&threat_dir={{ next_threat_dir('scoring_pressure', 'desc') }}">Scoring{% if current_threat_sort == 'scoring_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+                    <th>Coach</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -191,6 +205,7 @@
                       <td>{{ item.power_pressure }}</td>
                       <td>{{ item.skills_pressure }}</td>
                       <td>{{ item.scoring_pressure }}</td>
+                      <td>{{ item.manual_scout_score if item.manual_scout_score is not none else "N/A" }}{% if item.manual_note_summary %} · {{ item.manual_note_summary }}{% endif %}</td>
                     </tr>
                   {% endfor %}
                 </tbody>
@@ -206,7 +221,7 @@
               {% if power_rankings %}
                 <table>
                   <thead>
-                    <tr><th>Power</th><th>Team</th><th>Official</th><th>OPR</th><th>DPR</th><th>CCWM</th><th>Form</th><th>Skills</th><th>Score</th></tr>
+                    <tr><th>Power</th><th>Team</th><th>Official</th><th>OPR</th><th>DPR</th><th>CCWM</th><th>Form</th><th>Skills</th><th>Coach</th><th>Score</th><th>Coach Note</th></tr>
                   </thead>
                   <tbody>
                     {% for item in power_rankings %}
@@ -219,7 +234,9 @@
                         <td>{{ item.ccwm }}</td>
                         <td>{{ item.recent_form }}</td>
                         <td>{{ item.skills_total }}</td>
+                        <td>{{ item.manual_scout_score if item.manual_scout_score is not none else "N/A" }} @ {{ item.manual_scout_weight if item.manual_scout_weight is not none else "N/A" }}</td>
                         <td>{{ item.composite_score }}</td>
+                        <td>{{ item.manual_note_summary or "-" }}</td>
                       </tr>
                     {% endfor %}
                   </tbody>

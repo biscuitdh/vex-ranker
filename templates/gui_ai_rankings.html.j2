@@ -3,13 +3,16 @@
 {% set page_title = "AI Rankings" %}
 {% block content %}
   {% set ai = ai_rankings if ai_rankings is defined and ai_rankings else none %}
+  {% set team_label = selected_team_number or (latest_snapshot.team_number if latest_snapshot else settings.team_number) %}
+  {% set threat_base = ('/ai-rankings' ~ team_query) if (not static_site and team_query) else ('/ai-rankings' if not static_site else './' ~ team_query) %}
+  {% set threat_joiner = '&' if team_query else '?' %}
   {% set current_threat_sort = threat_sort if threat_sort is defined else "threat_score" %}
   {% set current_threat_dir = threat_dir if threat_dir is defined else "desc" %}
-  {% call ui.page_intro("AI Rankings", "Hourly Ranking Intelligence", "A 7157B-centered scouting brief synthesized from official standings, power metrics, skills, threats, alliance effects, and source quality.") %}
-    <a class="header-action" href="{{ '/' if not static_site else '../index.html' }}">Back To Dashboard</a>
-    <a class="header-action" href="{{ '/matches' if not static_site else '../matches/' }}">Open Matches</a>
+  {% call ui.page_intro("AI Rankings", team_label ~ " Ranking Intelligence", "A team-centered scouting brief refreshed from the latest standings, power metrics, skills, threats, alliance effects, and source quality.") %}
+    <a class="header-action" href="{{ ('/' ~ team_query) if not static_site and team_query else ('/' if not static_site else '../index.html' ~ team_query) }}">Back To Dashboard</a>
+    <a class="header-action" href="{{ ('/matches' ~ team_query) if not static_site and team_query else ('/matches' if not static_site else '../matches/' ~ team_query) }}">Open Matches</a>
     {% if not static_site %}
-      <form method="post" action="/actions/refresh-ai-rankings">
+      <form method="post" action="/actions/refresh-ai-rankings{% if team_query %}{{ team_query }}{% endif %}">
         <button type="submit" class="header-action">Refresh AI Rankings</button>
       </form>
     {% endif %}
@@ -37,13 +40,13 @@
     {% endif %}
 
     <section class="summary-card" style="margin-top: 16px;">
-      {{ ui.section_header("Headline", "Current AI Ranking Read", "The hourly synthesized readout of what matters most for 7157B right now.") }}
+      {{ ui.section_header("Headline", "Current AI Ranking Read", "The current synthesized readout of what matters most for the selected team right now.") }}
       <div class="muted-panel">{{ ai.headline }}</div>
       <div class="muted-panel" style="margin-top: 12px;">{{ ai.why_it_matters }}</div>
     </section>
 
     <section class="summary-card" style="margin-top: 16px;">
-      {{ ui.section_header("Impact", "Recent Match Impact", "What the most recent completed result appears to have done to 7157B's standing picture.") }}
+      {{ ui.section_header("Impact", "Recent Match Impact", "What the most recent completed result appears to have done to the selected team’s standing picture.") }}
       {% if match_intelligence.last_match or latest_snapshot %}
         <div class="muted-panel">
           {% if match_intelligence.last_match %}
@@ -124,21 +127,21 @@
 
     <div class="split" style="margin-top: 16px;">
       <section class="summary-card">
-        {{ ui.section_header("Threats", "Nearby Threats", "Closest teams around 7157B that currently matter most.") }}
+        {{ ui.section_header("Threats", "Nearby Threats", "Closest teams around the selected team that currently matter most.") }}
         {% if ai.threat_rows %}
           <table>
             <thead>
               <tr>
-                <th><a class="sort-link" href="{{ '/ai-rankings' if not static_site else './' }}?threat_sort=team_number&threat_dir={{ next_threat_dir('team_number', 'asc') }}">Team{% if current_threat_sort == 'team_number' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+                <th><a class="sort-link" href="{{ threat_base }}{{ threat_joiner }}threat_sort=team_number&threat_dir={{ next_threat_dir('team_number', 'asc') }}">Team{% if current_threat_sort == 'team_number' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
                 <th>Official</th>
                 <th>Power</th>
                 <th>Skills</th>
                 <th>OPR</th>
-                <th><a class="sort-link" href="{{ '/ai-rankings' if not static_site else './' }}?threat_sort=threat_score&threat_dir={{ next_threat_dir('threat_score', 'desc') }}">Threat{% if current_threat_sort == 'threat_score' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
-                <th><a class="sort-link" href="{{ '/ai-rankings' if not static_site else './' }}?threat_sort=official_pressure&threat_dir={{ next_threat_dir('official_pressure', 'desc') }}">Official{% if current_threat_sort == 'official_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
-                <th><a class="sort-link" href="{{ '/ai-rankings' if not static_site else './' }}?threat_sort=power_pressure&threat_dir={{ next_threat_dir('power_pressure', 'desc') }}">Power{% if current_threat_sort == 'power_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
-                <th><a class="sort-link" href="{{ '/ai-rankings' if not static_site else './' }}?threat_sort=skills_pressure&threat_dir={{ next_threat_dir('skills_pressure', 'desc') }}">Skills{% if current_threat_sort == 'skills_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
-                <th><a class="sort-link" href="{{ '/ai-rankings' if not static_site else './' }}?threat_sort=scoring_pressure&threat_dir={{ next_threat_dir('scoring_pressure', 'desc') }}">Scoring{% if current_threat_sort == 'scoring_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+                <th><a class="sort-link" href="{{ threat_base }}{{ threat_joiner }}threat_sort=threat_score&threat_dir={{ next_threat_dir('threat_score', 'desc') }}">Threat{% if current_threat_sort == 'threat_score' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+                <th><a class="sort-link" href="{{ threat_base }}{{ threat_joiner }}threat_sort=official_pressure&threat_dir={{ next_threat_dir('official_pressure', 'desc') }}">Official{% if current_threat_sort == 'official_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+                <th><a class="sort-link" href="{{ threat_base }}{{ threat_joiner }}threat_sort=power_pressure&threat_dir={{ next_threat_dir('power_pressure', 'desc') }}">Power{% if current_threat_sort == 'power_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+                <th><a class="sort-link" href="{{ threat_base }}{{ threat_joiner }}threat_sort=skills_pressure&threat_dir={{ next_threat_dir('skills_pressure', 'desc') }}">Skills{% if current_threat_sort == 'skills_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
+                <th><a class="sort-link" href="{{ threat_base }}{{ threat_joiner }}threat_sort=scoring_pressure&threat_dir={{ next_threat_dir('scoring_pressure', 'desc') }}">Scoring{% if current_threat_sort == 'scoring_pressure' %} {{ '↑' if current_threat_dir == 'asc' else '↓' }}{% endif %}</a></th>
                 <th>Coach</th>
               </tr>
             </thead>
@@ -166,7 +169,7 @@
       </section>
 
       <section class="summary-card">
-        {{ ui.section_header("Swing", "Likely Swing Matches", "Upcoming matches most likely to move 7157B's trajectory.") }}
+        {{ ui.section_header("Swing", "Likely Swing Matches", "Upcoming matches most likely to move this team’s trajectory.") }}
         {% if ai.swing_rows %}
           <table>
             <thead>
@@ -192,7 +195,7 @@
 
     <div class="split" style="margin-top: 16px;">
       <section class="summary-card">
-        {{ ui.section_header("Alliance", "Alliance Effects", "Best observed partner fit and toughest opponent pressure around 7157B.") }}
+        {{ ui.section_header("Alliance", "Alliance Effects", "Best observed partner fit and toughest opponent pressure around the selected team.") }}
         {% if ai.alliance and (ai.alliance.best_partner or ai.alliance.toughest_opponent) %}
           <table>
             <thead>
@@ -223,7 +226,7 @@
       </section>
 
       <section class="summary-card">
-        {{ ui.section_header("Movement", "Relevant Movers", "Top recent movers that could affect 7157B's local ranking pressure.") }}
+        {{ ui.section_header("Movement", "Relevant Movers", "Top recent movers that could affect the selected team’s local ranking pressure.") }}
         {% if ai.top_movers %}
           <table>
             <thead>

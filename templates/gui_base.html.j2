@@ -60,6 +60,17 @@
       .brand h1 { margin: 0; font-size: 2.2rem; letter-spacing: -0.04em; font-weight: 760; }
       .brand p, .small { color: var(--muted); line-height: 1.6; }
       .selected-meta, .btn-row, .header-tools, .tab-bar { display: flex; flex-wrap: wrap; gap: 10px; }
+      .team-picker {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+        margin-top: 12px;
+      }
+      .team-picker input[type="text"] {
+        min-width: 180px;
+        max-width: 260px;
+      }
       .chip, .badge {
         display: inline-block;
         padding: 6px 10px;
@@ -334,19 +345,40 @@
       }
     </style>
   </head>
-  <body class="{% if static_site %}public-shell{% else %}operator-shell{% endif %}">
+  {% set current_team = selected_team_number or settings.team_number %}
+  {% set current_team_name = (latest_snapshot.team_name if latest_snapshot is defined and latest_snapshot and latest_snapshot.team_name else (selected_team_entry.team_name if selected_team_entry is defined and selected_team_entry and selected_team_entry.team_name else settings.team_name_alias)) %}
+  {% set current_team_school = (latest_snapshot.school_name if latest_snapshot is defined and latest_snapshot and latest_snapshot.school_name else (selected_team_entry.organization if selected_team_entry is defined and selected_team_entry and selected_team_entry.organization else settings.school_alias)) %}
+  <body class="{% if static_site %}public-shell{% else %}operator-shell{% endif %}" data-rendered-team="{{ rendered_team_number or current_team }}">
     <div class="page">
       <div class="top-shell">
         <header class="app-header">
           <div class="header-row">
             <div class="brand">
               <span class="section-label">VEX Worlds 2026</span>
-              <h1>{% if static_site %}Team {{ settings.team_number }} Snapshot Dashboard{% else %}Team {{ settings.team_number }} Monitoring Console{% endif %}</h1>
-              <p>{{ settings.team_name_alias }} · {{ settings.school_alias }}</p>
+              <h1>{% if static_site %}{{ current_team }} Match Day{% else %}Team {{ current_team }} Monitoring Console{% endif %}</h1>
+              <p>{{ current_team_name }}{% if current_team_school %} · {{ current_team_school }}{% endif %}</p>
               {% if static_site and export_metadata %}
                 <div class="page-note small">
                   Updated {{ display_time(export_metadata.generated_at) }}
                 </div>
+              {% endif %}
+              {% if available_teams or static_team_manifest %}
+                <form class="team-picker" method="get" action="{% if not static_site %}{{ current_path or '/' }}{% endif %}">
+                  <input
+                    type="text"
+                    name="team"
+                    list="team-options"
+                    value="{{ current_team }}"
+                    placeholder="Enter team number"
+                    aria-label="Team number lookup"
+                  >
+                  <datalist id="team-options">
+                    {% for item in (available_teams if available_teams else static_team_manifest) %}
+                      <option value="{{ item.team_number }}">{{ item.team_name or item.organization or item.team_number }}</option>
+                    {% endfor %}
+                  </datalist>
+                  <button type="submit" class="header-action">View Team</button>
+                </form>
               {% endif %}
             </div>
             {% if not static_site %}
@@ -359,7 +391,7 @@
                 {% if media_state %}
                   <div class="chip">Media Watcher {{ media_state.status|title if media_state.status else "Idle" }}</div>
                 {% endif %}
-                <form method="post" action="/actions/run-now">
+                <form method="post" action="/actions/run-now{% if team_query %}{{ team_query }}{% endif %}">
                   <button type="submit" class="header-action">Run Refresh</button>
                 </form>
               </div>
@@ -371,7 +403,7 @@
               <span class="chip">Division {{ settings.division_name }}</span>
               <span class="chip">Competition {{ settings.poll_interval_minutes }}m</span>
               <span class="chip">Media {{ settings.media_interval_minutes }}m</span>
-              <span class="chip">Refresh Manual + Launch</span>
+              <span class="chip">Refresh Manual + {{ settings.poll_interval_minutes }}m</span>
               <span class="chip">Optional Social {{ "On" if settings.enable_optional_social else "Off" }}</span>
             </div>
           {% endif %}
@@ -394,5 +426,57 @@
         </main>
       </div>
     </div>
+    {% if static_site and static_team_manifest %}
+      <script>
+        (() => {
+          const formatLocalTimes = () => {
+            for (const node of document.querySelectorAll(".local-time[data-iso]")) {
+              const iso = node.dataset.iso;
+              if (!iso) continue;
+              const parsed = new Date(iso);
+              if (Number.isNaN(parsed.getTime())) {
+                if (node.dataset.fallback) node.textContent = node.dataset.fallback;
+                continue;
+              }
+              node.textContent = new Intl.DateTimeFormat(undefined, {
+                weekday: "short",
+                month: "short",
+                day: "numeric",
+                hour: "numeric",
+                minute: "2-digit",
+              }).format(parsed).replace(",", " ·");
+            }
+          };
+          formatLocalTimes();
+          const requested = (new URLSearchParams(window.location.search).get("team") || "").trim().toUpperCase();
+          const rendered = String(document.body.dataset.renderedTeam || "").trim().toUpperCase();
+          if (!requested || requested === rendered) return;
+          const manifest = {{ static_team_manifest|tojson }};
+          const validTeams = new Set(manifest.map((item) => String(item.team_number || "").toUpperCase()));
+          if (!validTeams.has(requested)) return;
+          const pageKey = {{ active_tab|tojson }};
+          const payloadBase = {{ team_payload_base|tojson }};
+          fetch(`${payloadBase}/${requested}.json`, { credentials: "same-origin" })
+            .then((response) => {
+              if (!response.ok) {
+                throw new Error(`team payload ${response.status}`);
+              }
+              return response.json();
+            })
+            .then((payload) => {
+              const html = payload?.pages?.[pageKey];
+              if (!html) {
+                throw new Error("missing page html");
+              }
+              document.open();
+              document.write(html);
+              document.close();
+            })
+            .catch(() => {
+              // Keep the default-team fallback if the requested payload is unavailable.
+            });
+        })();
+      </script>
+    {% endif %}
   </body>
 </html>

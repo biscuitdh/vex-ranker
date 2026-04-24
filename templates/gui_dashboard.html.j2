@@ -4,14 +4,15 @@
 {% block content %}
   {% set snapshot = latest_snapshot %}
   {% set power = team_power %}
+  {% set team_label = selected_team_number or (snapshot.team_number if snapshot else settings.team_number) %}
   {% set rankings = rankings_status if rankings_status is defined else {"rankings_count": 0} %}
   {% set analysis_view = analysis if analysis is defined else {"headline": "", "cards": []} %}
   {% set health = dashboard_health if dashboard_health is defined else {"status": "unknown", "freshness": {}} %}
   {% if static_site %}
-    {% call ui.page_intro("Public Snapshot", "7157B Match Day", "A simple public view with the current read and the next known matches.") %}
+    {% call ui.page_intro("Public Snapshot", team_label ~ " Match Day", "A mobile-friendly scout view with the current read, recent impact, and the next known matches.") %}
       <div class="public-nav">
-        <a class="header-action" href="ai-rankings/">AI Rankings</a>
-        <a class="header-action" href="matches/">Match Slate</a>
+        <a class="header-action" href="ai-rankings/{% if team_query %}{{ team_query }}{% endif %}">AI Rankings</a>
+        <a class="header-action" href="matches/{% if team_query %}{{ team_query }}{% endif %}">Match Slate</a>
       </div>
       {% if settings.livestream_url %}
         <a class="header-action" href="{{ settings.livestream_url }}" target="_blank" rel="noopener noreferrer">Open Livestream</a>
@@ -107,17 +108,17 @@
               </tbody>
             </table>
           {% else %}
-            <div class="muted-panel">No upcoming 7157B match slate is available right now.</div>
+            <div class="muted-panel">No upcoming {{ team_label }} match slate is available right now.</div>
           {% endif %}
         </div>
       </section>
     </div>
   {% else %}
   {% call ui.page_intro("Overview", "Current Team Status", "Official team status stays front and center, with division-wide context available in Rankings.") %}
-    <a class="header-action" href="{{ '/rankings' if not static_site else 'rankings/' }}">Open Rankings</a>
-    <a class="header-action" href="{{ '/ai-rankings' if not static_site else 'ai-rankings/' }}">Open AI Rankings</a>
-    <a class="header-action" href="{{ '/analysis' if not static_site else 'analysis/' }}">Open Analysis</a>
-    <a class="header-action" href="{{ '/media' if not static_site else 'media/' }}">Open Media</a>
+    <a class="header-action" href="{{ '/rankings' ~ team_query if not static_site and team_query else ('/rankings' if not static_site else 'rankings/' ~ team_query) }}">Open Rankings</a>
+    <a class="header-action" href="{{ '/ai-rankings' ~ team_query if not static_site and team_query else ('/ai-rankings' if not static_site else 'ai-rankings/' ~ team_query) }}">Open AI Rankings</a>
+    <a class="header-action" href="{{ '/analysis' ~ team_query if not static_site and team_query else ('/analysis' if not static_site else 'analysis/' ~ team_query) }}">Open Analysis</a>
+    <a class="header-action" href="{{ '/media' ~ team_query if not static_site and team_query else ('/media' if not static_site else 'media/' ~ team_query) }}">Open Media</a>
   {% endcall %}
 
   {{ ui.metric_grid([
@@ -150,6 +151,8 @@
             <tr><th>Last Health Check</th><td>{{ last_healthcheck.completed_at if last_healthcheck else "Unknown" }}</td></tr>
             <tr><th>Last Repair</th><td>{{ last_repair_attempt.completed_at if last_repair_attempt else "Never" }}</td></tr>
             <tr><th>Last Restart</th><td>{{ last_restart_event.requested_at if last_restart_event else "Never" }}</td></tr>
+            <tr><th>Last Discord Request</th><td>{{ last_discord_request.created_at if last_discord_request else "Never" }}</td></tr>
+            <tr><th>Last Discord Reply</th><td>{{ last_discord_reply.received_at if last_discord_reply else "Never" }}</td></tr>
             <tr><th>Latest Snapshot Age</th><td>{{ health.freshness.latest_snapshot_age_minutes if health.freshness and health.freshness.latest_snapshot_age_minutes is not none else "Unknown" }} min</td></tr>
             <tr><th>AI Snapshot Age</th><td>{{ health.freshness.ai_age_minutes if health.freshness and health.freshness.ai_age_minutes is not none else "Unknown" }} min</td></tr>
           </tbody>
@@ -215,7 +218,7 @@
       </div>
 
       <div class="summary-card">
-        {{ ui.section_header("Threats", "Closest Division Threats", "Teams most likely to matter to 7157B right now based on rank proximity, power, skills, and OPR.") }}
+        {{ ui.section_header("Threats", "Closest Division Threats", "Teams most likely to matter to the selected team right now based on rank proximity, power, skills, and OPR.") }}
         {% if threat_list %}
           <table>
             <thead>
@@ -294,7 +297,7 @@
       </div>
 
       <div class="summary-card">
-        {{ ui.section_header("Swing", "Upcoming Swing Match", "The scheduled match most likely to move 7157B's trajectory next.") }}
+        {{ ui.section_header("Swing", "Upcoming Swing Match", "The scheduled match most likely to move this team’s trajectory next.") }}
         {% if swing_matches %}
           <div class="muted-panel">
             {{ swing_matches[0].round_label or swing_matches[0].match_key }}
@@ -347,7 +350,7 @@
       </div>
 
       <div class="summary-card">
-        {{ ui.section_header("Slate", "Upcoming Matchups", "The next known 7157B matches with partner and opponent ranking context.") }}
+        {{ ui.section_header("Slate", "Upcoming Matchups", "The next known matches with partner and opponent ranking context.") }}
         {% if matchup_summary %}
           <div class="muted-panel" style="margin-bottom: 12px;">{{ matchup_summary.headline }}</div>
         {% endif %}
@@ -373,7 +376,7 @@
             </tbody>
           </table>
         {% else %}
-          <div class="muted-panel">No upcoming 7157B matchup slate is available from the local cache yet.</div>
+          <div class="muted-panel">No upcoming {{ team_label }} matchup slate is available from the local cache yet.</div>
         {% endif %}
       </div>
 

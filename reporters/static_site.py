@@ -12,6 +12,7 @@ import subprocess
 from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+from markupsafe import Markup
 
 from config import Settings
 from reporters.json_export import render_json_export
@@ -42,17 +43,21 @@ def _template_environment(base_dir: Path) -> Environment:
 
 
 def _display_time(value: Any) -> str:
-    """Render a parent-friendly Eastern time timestamp."""
+    """Render a client-local-friendly timestamp for the static site."""
     if value in (None, "", "Unknown"):
         return "TBD"
+    raw_value = str(value)
     try:
-        parsed = datetime.fromisoformat(str(value))
+        parsed = datetime.fromisoformat(raw_value)
     except ValueError:
-        return str(value)
+        return raw_value
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    local_time = parsed.astimezone()
-    return local_time.strftime("%a, %b %-d · %-I:%M %p")
+    fallback = parsed.astimezone().strftime("%a, %b %-d · %-I:%M %p")
+    iso_value = parsed.astimezone(timezone.utc).isoformat()
+    return Markup(
+        f'<span class="local-time" data-iso="{iso_value}" data-fallback="{fallback}">{fallback}</span>'
+    )
 
 
 def _display_source_name(value: Any) -> str:
@@ -67,7 +72,7 @@ def _display_source_name(value: Any) -> str:
     return label.title()
 
 
-def _relative_href(page_key: str, current_key: str) -> str:
+def _relative_href(page_key: str, current_key: str, team_number: str | None = None) -> str:
     """Return a relative href from one exported page to another."""
     if current_key == "dashboard":
         prefix = ""
@@ -75,18 +80,23 @@ def _relative_href(page_key: str, current_key: str) -> str:
         prefix = "../"
     target = PAGE_SPECS[page_key][0]
     if page_key == "dashboard":
-        return f"{prefix}index.html"
-    return f"{prefix}{target[:-10]}/"
+        href = f"{prefix}index.html"
+    else:
+        href = f"{prefix}{target[:-10]}/"
+    if team_number:
+        separator = "&" if "?" in href else "?"
+        return f"{href}{separator}team={team_number}"
+    return href
 
 
-def _nav_items(current_key: str) -> list[tuple[str, str, str]]:
+def _nav_items(current_key: str, team_number: str | None = None) -> list[tuple[str, str, str]]:
     """Build navigation links for the static site."""
     labels = {
         "dashboard": "Dashboard",
         "ai_rankings": "AI Rankings",
         "matches": "Matches",
     }
-    return [(key, _relative_href(key, current_key), labels[key]) for key in PAGE_SPECS]
+    return [(key, _relative_href(key, current_key, team_number), labels[key]) for key in PAGE_SPECS]
 
 
 def _status_banner(view: dict[str, Any]) -> dict[str, str]:
@@ -105,6 +115,34 @@ def _status_banner(view: dict[str, Any]) -> dict[str, str]:
         "headline": f"Team {snapshot.get('team_number')} - Rank #{snapshot.get('rank') or 'N/A'}{power_text}{ai_text}",
         "subtext": f"Last update { _display_time(snapshot.get('fetched_at')) }",
     }
+
+
+def _manifest_entry(team_number: str, view: dict[str, Any]) -> dict[str, Any]:
+    """Build one available-team manifest entry."""
+    snapshot = view.get("latest_snapshot") or {}
+    selected = view.get("selected_team_entry") or {}
+    return {
+        "team_number": team_number,
+        "team_name": snapshot.get("team_name") or selected.get("team_name"),
+        "organization": snapshot.get("school_name") or selected.get("organization"),
+        "official_rank": snapshot.get("rank") or selected.get("official_rank"),
+    }
+
+
+def _build_team_manifest(team_views: dict[str, dict[str, Any]], default_team_number: str) -> list[dict[str, Any]]:
+    """Build a sorted available-team manifest for the public site."""
+    entries = [_manifest_entry(team_number, view) for team_number, view in team_views.items()]
+    seen = {entry["team_number"] for entry in entries}
+    if default_team_number not in seen:
+        entries.append({"team_number": default_team_number, "team_name": None, "organization": None, "official_rank": None})
+    entries.sort(
+        key=lambda item: (
+            item.get("official_rank") is None,
+            item.get("official_rank") if item.get("official_rank") is not None else 999999,
+            item.get("team_number") or "",
+        )
+    )
+    return entries
 
 
 def _json_safe(value: Any) -> Any:
@@ -160,7 +198,12 @@ def _sanitized_static_view(view: dict[str, Any]) -> dict[str, Any]:
     return sanitized
 
 
-def export_static_site(base_dir: Path, settings: Settings, view: dict[str, Any]) -> dict[str, str]:
+def export_static_site(
+    base_dir: Path,
+    settings: Settings,
+    view: dict[str, Any],
+    team_views: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, str]:
     """Render the static dashboard and JSON snapshot bundle."""
     environment = _template_environment(base_dir)
     exported_at = utc_now()
@@ -176,7 +219,14 @@ def export_static_site(base_dir: Path, settings: Settings, view: dict[str, Any])
     data_dir.mkdir(parents=True, exist_ok=True)
     (site_dir / ".nojekyll").write_text("", encoding="utf-8")
 
-    export_view = _sanitized_static_view(view)
+    team_views = team_views or {
+        str(view.get("selected_team_number") or settings.team_number): view,
+    }
+    default_team_number = str(settings.team_number)
+    if default_team_number not in team_views:
+        default_team_number = next(iter(team_views.keys()))
+    export_view = _sanitized_static_view(team_views[default_team_number])
+    team_manifest = _build_team_manifest(team_views, str(settings.team_number))
     export_metadata = {
         "generated_at": exported_at,
         "base_url": settings.static_site_base_url,
@@ -194,13 +244,17 @@ def export_static_site(base_dir: Path, settings: Settings, view: dict[str, Any])
             {
                 "settings": settings,
                 "active_tab": page_key,
-                "nav_items": _nav_items(page_key),
+                "nav_items": _nav_items(page_key, default_team_number),
+                "team_query": f"?team={default_team_number}",
                 "status_banner": _status_banner(export_view),
                 "action_message": "",
                 "refresh_state": {},
                 "media_state": {},
                 "static_site": True,
                 "export_metadata": export_metadata,
+                "static_team_manifest": team_manifest,
+                "rendered_team_number": default_team_number,
+                "team_payload_base": "data/teams" if page_key == "dashboard" else "../data/teams",
                 "threat_sort": "threat_score",
                 "threat_dir": "desc",
                 "next_threat_dir": lambda _requested_sort, default_dir="desc": default_dir,
@@ -217,6 +271,70 @@ def export_static_site(base_dir: Path, settings: Settings, view: dict[str, Any])
         json.dumps(_json_safe(render_json_export(export_view)), indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
+    team_data_dir = data_dir / "teams"
+    team_data_dir.mkdir(parents=True, exist_ok=True)
+    (team_data_dir / "index.json").write_text(
+        json.dumps(
+            {
+                "generated_at": exported_at,
+                "default_team_number": default_team_number,
+                "teams": team_manifest,
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    for team_number, team_view in team_views.items():
+        sanitized_view = _sanitized_static_view(team_view)
+        team_export_metadata = {
+            "generated_at": exported_at,
+            "base_url": settings.static_site_base_url,
+            "source_snapshot_at": (sanitized_view.get("latest_snapshot") or {}).get("fetched_at")
+            or (sanitized_view.get("rankings_status") or {}).get("source_updated_at"),
+            "source_type": (sanitized_view.get("rankings_status") or {}).get("snapshot_source")
+            or (sanitized_view.get("latest_snapshot") or {}).get("source")
+            or "unknown",
+            "source_state": (sanitized_view.get("rankings_status") or {}).get("source_state") or "unknown",
+        }
+        rendered_pages: dict[str, str] = {}
+        for page_key, (_relative_path, template_name) in PAGE_SPECS.items():
+            team_context = dict(sanitized_view)
+            team_context.update(
+                {
+                    "settings": settings,
+                    "active_tab": page_key,
+                    "nav_items": _nav_items(page_key, team_number),
+                    "team_query": f"?team={team_number}",
+                    "status_banner": _status_banner(sanitized_view),
+                    "action_message": "",
+                    "refresh_state": {},
+                    "media_state": {},
+                    "static_site": True,
+                    "export_metadata": team_export_metadata,
+                    "static_team_manifest": team_manifest,
+                    "rendered_team_number": team_number,
+                    "team_payload_base": "data/teams" if page_key == "dashboard" else "../data/teams",
+                    "threat_sort": "threat_score",
+                    "threat_dir": "desc",
+                    "next_threat_dir": lambda _requested_sort, default_dir="desc": default_dir,
+                }
+            )
+            rendered_pages[page_key] = environment.get_template(template_name).render(**team_context)
+        payload = {
+            "generated_at": exported_at,
+            "team_number": team_number,
+            "manifest_entry": _manifest_entry(team_number, sanitized_view),
+            "dashboard": _json_safe(render_json_export(sanitized_view)),
+            "ai_rankings": _json_safe(_page_payloads(sanitized_view, settings, exported_at)["ai-rankings"]),
+            "matches": _json_safe(_page_payloads(sanitized_view, settings, exported_at)["matches"]),
+            "pages": rendered_pages,
+        }
+        (team_data_dir / f"{team_number}.json").write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
     return {"site_dir": str(site_dir), "generated_at": exported_at, "index": str(site_dir / "index.html"), **written_pages}
 
 
@@ -285,4 +403,11 @@ def publish_to_git_repo(settings: Settings) -> dict[str, Any]:
             "published": False,
             "repo": str(repo_path),
             "reason": exc.stderr.strip() or exc.stdout.strip() or str(exc),
+        }
+    except OSError as exc:
+        LOGGER.warning("Static site publish failed", extra={"repo": str(repo_path), "error": str(exc)})
+        return {
+            "published": False,
+            "repo": str(repo_path),
+            "reason": str(exc),
         }

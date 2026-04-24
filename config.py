@@ -60,6 +60,14 @@ class Settings:
     robotevents_api_key: str = ""
     robotevents_api_base: str = "https://www.robotevents.com/api/v2"
     discord_webhook_url: str = ""
+    discord_bot_token: str = ""
+    discord_application_id: str = ""
+    discord_public_key: str = ""
+    discord_channel_id: str = ""
+    discord_allowed_user_ids: list[str] = field(default_factory=list)
+    discord_reply_timeout_minutes: int = 20
+    discord_approval_prefix: str = "approve"
+    discord_text_fallback_enabled: bool = False
     poll_interval_minutes: int = 10
     media_interval_minutes: int = 60
     enable_background_media_watcher: bool = True
@@ -104,6 +112,7 @@ class Settings:
     healthcheck_interval_minutes: int = 60
     dashboard_stale_minutes: int = 75
     ai_rankings_stale_minutes: int = 90
+    match_progress_grace_minutes: int = 10
     max_auto_repair_attempts: int = 2
     restart_cooldown_minutes: int = 30
     enable_auto_heal: bool = True
@@ -117,6 +126,7 @@ class Settings:
     power_rank_weight_ccwm: float = 0.15
     power_rank_weight_skills: float = 0.10
     power_rank_weight_form: float = 0.10
+    power_rank_weight_manual: float = 0.12
     search_terms: list[str] = field(default_factory=list)
     optional_rss_urls: list[str] = field(default_factory=list)
     official_source_urls: list[str] = field(default_factory=list)
@@ -187,6 +197,14 @@ def load_settings(env_file: str | None = ".env") -> Settings:
         robotevents_api_key=os.getenv("ROBOTEVENTS_API_KEY", "").strip(),
         robotevents_api_base=os.getenv("ROBOTEVENTS_API_BASE", "https://www.robotevents.com/api/v2").rstrip("/"),
         discord_webhook_url=os.getenv("DISCORD_WEBHOOK_URL", "").strip(),
+        discord_bot_token=os.getenv("DISCORD_BOT_TOKEN", "").strip(),
+        discord_application_id=os.getenv("DISCORD_APPLICATION_ID", "").strip(),
+        discord_public_key=os.getenv("DISCORD_PUBLIC_KEY", "").strip(),
+        discord_channel_id=os.getenv("DISCORD_CHANNEL_ID", "").strip(),
+        discord_allowed_user_ids=_parse_terms(os.getenv("DISCORD_ALLOWED_USER_IDS")),
+        discord_reply_timeout_minutes=max(1, _parse_int(os.getenv("DISCORD_REPLY_TIMEOUT_MINUTES"), 20)),
+        discord_approval_prefix=os.getenv("DISCORD_APPROVAL_PREFIX", "approve").strip().lower() or "approve",
+        discord_text_fallback_enabled=_parse_bool(os.getenv("DISCORD_TEXT_FALLBACK_ENABLED"), False),
         poll_interval_minutes=_parse_int(os.getenv("POLL_INTERVAL_MINUTES"), 10),
         media_interval_minutes=_parse_int(os.getenv("MEDIA_INTERVAL_MINUTES"), 60),
         enable_background_media_watcher=_parse_bool(os.getenv("ENABLE_BACKGROUND_MEDIA_WATCHER"), True),
@@ -242,6 +260,7 @@ def load_settings(env_file: str | None = ".env") -> Settings:
         healthcheck_interval_minutes=max(5, _parse_int(os.getenv("HEALTHCHECK_INTERVAL_MINUTES"), 60)),
         dashboard_stale_minutes=max(5, _parse_int(os.getenv("DASHBOARD_STALE_MINUTES"), 75)),
         ai_rankings_stale_minutes=max(5, _parse_int(os.getenv("AI_RANKINGS_STALE_MINUTES"), 90)),
+        match_progress_grace_minutes=max(1, _parse_int(os.getenv("MATCH_PROGRESS_GRACE_MINUTES"), 10)),
         max_auto_repair_attempts=max(1, _parse_int(os.getenv("MAX_AUTO_REPAIR_ATTEMPTS"), 2)),
         restart_cooldown_minutes=max(1, _parse_int(os.getenv("RESTART_COOLDOWN_MINUTES"), 30)),
         enable_auto_heal=_parse_bool(os.getenv("ENABLE_AUTO_HEAL"), True),
@@ -255,6 +274,7 @@ def load_settings(env_file: str | None = ".env") -> Settings:
         power_rank_weight_ccwm=_parse_float(os.getenv("POWER_RANK_WEIGHT_CCWM"), 0.15),
         power_rank_weight_skills=_parse_float(os.getenv("POWER_RANK_WEIGHT_SKILLS"), 0.10),
         power_rank_weight_form=_parse_float(os.getenv("POWER_RANK_WEIGHT_FORM"), 0.10),
+        power_rank_weight_manual=min(0.15, max(0.0, _parse_float(os.getenv("POWER_RANK_WEIGHT_MANUAL"), 0.12))),
         search_terms=_parse_terms(os.getenv("SEARCH_TERMS")) or _default_search_terms(),
         optional_rss_urls=_parse_terms(os.getenv("OPTIONAL_RSS_URLS")),
         official_source_urls=_parse_terms(os.getenv("OFFICIAL_SOURCE_URLS")) or _default_official_sources(),

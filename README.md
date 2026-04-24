@@ -16,6 +16,7 @@ Lightweight monitoring agent for VEX Robotics Team `7157B` ("Mystery Machine", C
 - Autonomous analysis layer with an Analysis tab and summary commentary derived from current stored data
 - Static site export to `site/` for GitHub Pages publishing
 - Optional publish-to-repo workflow for a separate checked-out Pages repo
+- Discord webhook alerts plus an optional private-channel approval bridge for away-from-Mac control
 
 ## Requirements
 
@@ -41,6 +42,9 @@ Set at least:
 Optional:
 
 - `DISCORD_WEBHOOK_URL`
+- `DISCORD_BOT_TOKEN`
+- `DISCORD_CHANNEL_ID`
+- `DISCORD_ALLOWED_USER_IDS`
 - `OPTIONAL_RSS_URLS`
 - `SEARCH_TERMS`
 - `ENABLE_OPTIONAL_SOCIAL=true`
@@ -157,12 +161,66 @@ Notes:
 
 That split keeps generated artifacts out of the working codebase and makes rollback less annoying.
 
+## Discord Setup
+
+The repo now supports two Discord paths:
+
+1. `DISCORD_WEBHOOK_URL` for passive alerts
+2. a private-channel bot bridge for remote questions, button approvals, and explicit restart approvals
+
+### Webhook Only
+
+1. create a private Discord channel
+2. create a channel webhook for that channel
+3. paste the webhook into `DISCORD_WEBHOOK_URL`
+4. test it with:
+
+```bash
+python main.py --once --collector healthcheck
+```
+
+If the webhook is missing or malformed, startup logging and dashboard health will call that out directly.
+
+### Interactive Bridge
+
+Add these `.env` values:
+
+```dotenv
+DISCORD_BOT_TOKEN=your_discord_bot_token
+DISCORD_APPLICATION_ID=your_discord_application_id
+DISCORD_PUBLIC_KEY=your_discord_public_key
+DISCORD_CHANNEL_ID=123456789012345678
+DISCORD_ALLOWED_USER_IDS=123456789012345678
+DISCORD_REPLY_TIMEOUT_MINUTES=20
+DISCORD_APPROVAL_PREFIX=approve
+DISCORD_TEXT_FALLBACK_ENABLED=false
+```
+
+The bridge only trusts actions from `DISCORD_ALLOWED_USER_IDS` inside the configured channel. Normal operation is button-first:
+
+- `Approve`
+- `Deny`
+- `Need Info`
+
+Text replies still exist as an explicit fallback when `DISCORD_TEXT_FALLBACK_ENABLED=true`:
+
+- `approve <request_id>`
+- `deny <request_id>`
+- `answer <request_id>: <text>`
+
+Run the bridge locally with:
+
+```bash
+python discord_bridge.py
+```
+
 ## Hourly Mac Updates
 
 The repo now includes sample LaunchAgent plists for both long-running services:
 
 `ops/com.vexranker.monitor.plist.example`
 `ops/com.vexranker.gui.plist.example`
+`ops/com.vexranker.discord-bridge.plist.example`
 
 Recommended flow:
 
@@ -175,6 +233,7 @@ Recommended flow:
 ```bash
 launchctl load ~/Library/LaunchAgents/com.vexranker.monitor.plist
 launchctl load ~/Library/LaunchAgents/com.vexranker.gui.plist
+launchctl load ~/Library/LaunchAgents/com.vexranker.discord-bridge.plist
 ```
 
 The monitor agent runs:

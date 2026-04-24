@@ -123,6 +123,11 @@
           {% endif %}
           <tr><th>Last Repair</th><td>{{ last_repair_attempt.completed_at if last_repair_attempt else "Never" }}</td></tr>
           <tr><th>Last Restart</th><td>{{ last_restart_event.requested_at if last_restart_event else "Never" }}</td></tr>
+          <tr><th>Last Discord Request</th><td>{{ last_discord_request.created_at if last_discord_request else "Never" }}</td></tr>
+          <tr><th>Last Discord Reply</th><td>{{ last_discord_reply.received_at if last_discord_reply else "Never" }}</td></tr>
+          {% if pending_discord_requests %}
+            <tr><th>Pending Discord</th><td>{{ pending_discord_requests|length }} waiting · {{ pending_discord_requests[0].request_id }} · {{ pending_discord_requests[0].prompt_text }}</td></tr>
+          {% endif %}
           {% if dashboard_health and dashboard_health.components %}
             {% for name, component in dashboard_health.components.items() %}
               <tr><th>{{ name.replace("_", " ")|title }}</th><td>{{ component.status|title }} · {{ component.summary }}</td></tr>

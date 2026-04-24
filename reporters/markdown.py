@@ -83,8 +83,11 @@ def render_markdown_report(view: dict[str, Any]) -> str:
                 f"- Power Rank: #{power_row.get('power_rank')}",
                 f"- OPR/DPR/CCWM: {power_row.get('opr')}/{power_row.get('dpr')}/{power_row.get('ccwm')}",
                 f"- Recent form: {power_row.get('recent_form')}",
+                f"- Coach-note score: {power_row.get('manual_scout_score')} at weight {power_row.get('manual_scout_weight')}",
             ]
         )
+        if power_row.get("manual_note_summary"):
+            lines.append(f"- Coach-note summary: {power_row.get('manual_note_summary')}")
     if view.get("team_skill"):
         skill = view["team_skill"]
         lines.append(
