@@ -13,13 +13,7 @@ from typing import Callable
 
 from config import load_settings
 from main import run_ai_rankings_cycle, run_competition_cycle, run_full_cycle, run_media_cycle
-from storage.db import (
-    build_dashboard_view,
-    db_session,
-    get_available_teams,
-    init_db,
-    utc_now,
-)
+from storage.db import build_dashboard_view, db_session, init_db, utc_now
 from utils.logging import configure_logging
 from pathlib import Path
 
@@ -71,60 +65,28 @@ def status_banner(view: dict[str, object]) -> dict[str, str]:
     }
 
 
-def _normalized_team_number(value: str | None) -> str | None:
-    """Normalize a team-number query value."""
-    if value in (None, ""):
-        return None
-    return str(value).strip().upper() or None
-
-
-def _with_team_query(path: str, team_number: str | None) -> str:
-    """Append the current team query to a route when present."""
-    normalized = _normalized_team_number(team_number)
-    if not normalized:
-        return path
-    separator = "&" if "?" in path else "?"
-    return f"{path}{separator}team={normalized}"
-
-
-def _redirect_url(path: str, message: str, team_number: str | None) -> str:
-    """Build a redirect URL preserving the selected team."""
-    base = _with_team_query(path, team_number)
-    separator = "&" if "?" in base else "?"
-    return f"{base}{separator}message={message}"
-
-
 def view_context(
     active_tab: str,
     action_message: str = "",
-    team_number: str | None = None,
     current_path: str = "/",
 ) -> dict[str, object]:
     """Load the current application view from SQLite."""
     settings = load_settings()
     with db_session(settings.db_path) as connection:
         init_db(connection)
-        available_teams = get_available_teams(connection, settings.team_number, limit=250)
-        requested_team = _normalized_team_number(team_number) or settings.team_number
-        valid_teams = {str(item.get("team_number") or "").upper() for item in available_teams}
-        selected_team = requested_team if requested_team in valid_teams else settings.team_number
-        view = build_dashboard_view(connection, selected_team, settings)
-    team_query = f"?team={selected_team}" if selected_team else ""
+        view = build_dashboard_view(connection, settings.team_number, settings)
     view["settings"] = settings
     view["active_tab"] = active_tab
-    view["selected_team_number"] = selected_team
-    view["available_teams"] = view.get("available_teams") or available_teams
-    view["team_query"] = team_query
     view["current_path"] = current_path
     view["nav_items"] = [
-        ("dashboard", _with_team_query("/", selected_team), "Dashboard"),
-        ("analysis", _with_team_query("/analysis", selected_team), "Analysis"),
-        ("ai_rankings", _with_team_query("/ai-rankings", selected_team), "AI Rankings"),
-        ("rankings", _with_team_query("/rankings", selected_team), "Rankings"),
-        ("matches", _with_team_query("/matches", selected_team), "Matches"),
-        ("media", _with_team_query("/media", selected_team), "Media"),
-        ("history", _with_team_query("/history", selected_team), "History"),
-        ("settings", _with_team_query("/settings", selected_team), "Settings"),
+        ("dashboard", "/", "Dashboard"),
+        ("analysis", "/analysis", "Analysis"),
+        ("ai_rankings", "/ai-rankings", "AI Rankings"),
+        ("rankings", "/rankings", "Rankings"),
+        ("matches", "/matches", "Matches"),
+        ("media", "/media", "Media"),
+        ("history", "/history", "History"),
+        ("settings", "/settings", "Settings"),
     ]
     view["status_banner"] = status_banner(view)
     view["action_message"] = action_message
@@ -193,6 +155,21 @@ def html_response(
     return [body]
 
 
+def text_response(
+    start_response: Callable,
+    body: str,
+    status: str = "200 OK",
+    headers: list[tuple[str, str]] | None = None,
+) -> list[bytes]:
+    """Write a plain-text WSGI response."""
+    encoded = body.encode("utf-8")
+    response_headers = [("Content-Type", "text/plain; charset=utf-8"), ("Content-Length", str(len(encoded)))]
+    if headers:
+        response_headers.extend(headers)
+    start_response(status, response_headers)
+    return [encoded]
+
+
 def redirect_response(start_response: Callable, location: str) -> list[bytes]:
     """Return an HTTP redirect response."""
     start_response("302 Found", [("Location", location), ("Content-Length", "0")])
@@ -215,35 +192,28 @@ def create_app():
         path = environ.get("PATH_INFO", "/")
         query = parse_qs(environ.get("QUERY_STRING", ""))
         action_message = query.get("message", [""])[0]
-        selected_team = _normalized_team_number(query.get("team", [""])[0])
         threat_sort = query.get("threat_sort", ["threat_score"])[0]
         threat_dir = query.get("threat_dir", ["desc"])[0]
+
+        if method == "GET" and path == "/healthz":
+            return text_response(start_response, "ok\n")
 
         if method == "POST" and path == "/actions/run-now":
             settings = load_settings()
             try:
                 run_full_cycle(settings)
-                return redirect_response(start_response, _redirect_url("/", "Manual+refresh+completed", selected_team))
+                return redirect_response(start_response, "/?message=Manual+refresh+completed")
             except Exception as exc:
-                return redirect_response(
-                    start_response,
-                    _redirect_url("/", f"Refresh+failed:+{str(exc).replace(' ', '+')}", selected_team),
-                )
+                return redirect_response(start_response, f"/?message=Refresh+failed:+{str(exc).replace(' ', '+')}")
 
         if method == "POST" and path == "/actions/refresh-rankings":
             settings = load_settings()
             try:
                 result = run_competition_cycle(settings)
                 count = len(result.get("division_rankings", []))
-                return redirect_response(
-                    start_response,
-                    _redirect_url("/rankings", f"Rankings+refresh+completed:+{count}+teams", selected_team),
-                )
+                return redirect_response(start_response, f"/rankings?message=Rankings+refresh+completed:+{count}+teams")
             except Exception as exc:
-                return redirect_response(
-                    start_response,
-                    _redirect_url("/rankings", f"Rankings+refresh+failed:+{str(exc).replace(' ', '+')}", selected_team),
-                )
+                return redirect_response(start_response, f"/rankings?message=Rankings+refresh+failed:+{str(exc).replace(' ', '+')}")
 
         if method == "POST" and path == "/actions/refresh-ai-rankings":
             settings = load_settings()
@@ -251,17 +221,10 @@ def create_app():
                 payload = run_ai_rankings_cycle(settings)
                 return redirect_response(
                     start_response,
-                    _redirect_url(
-                        "/ai-rankings",
-                        f"AI+rankings+refresh+completed:+{payload.get('confidence', {}).get('level', 'unknown')}",
-                        selected_team,
-                    ),
+                    f"/ai-rankings?message=AI+rankings+refresh+completed:+{payload.get('confidence', {}).get('level', 'unknown')}",
                 )
             except Exception as exc:
-                return redirect_response(
-                    start_response,
-                    _redirect_url("/ai-rankings", f"AI+rankings+refresh+failed:+{str(exc).replace(' ', '+')}", selected_team),
-                )
+                return redirect_response(start_response, f"/ai-rankings?message=AI+rankings+refresh+failed:+{str(exc).replace(' ', '+')}")
 
         if method == "POST" and path == "/actions/refresh-media":
             settings = load_settings()
@@ -288,10 +251,7 @@ def create_app():
                     last_error="; ".join(source_failures[:3]),
                     last_partial_count=len(source_failures),
                 )
-                return redirect_response(
-                    start_response,
-                    _redirect_url("/media", f"Media+refresh+completed:+{new_count}+new+items", selected_team),
-                )
+                return redirect_response(start_response, f"/media?message=Media+refresh+completed:+{new_count}+new+items")
             except Exception as exc:
                 _set_media_state(
                     status="failed",
@@ -299,16 +259,13 @@ def create_app():
                     last_completed_at="",
                     last_error=str(exc),
                 )
-                return redirect_response(
-                    start_response,
-                    _redirect_url("/media", f"Media+refresh+failed:+{str(exc).replace(' ', '+')}", selected_team),
-                )
+                return redirect_response(start_response, f"/media?message=Media+refresh+failed:+{str(exc).replace(' ', '+')}")
 
         if path == "/":
-            body = render_template("gui_dashboard.html.j2", view_context("dashboard", action_message, selected_team, "/"))
+            body = render_template("gui_dashboard.html.j2", view_context("dashboard", action_message, "/"))
             return html_response(start_response, body)
         if path == "/rankings":
-            context = view_context("rankings", action_message, selected_team, "/rankings")
+            context = view_context("rankings", action_message, "/rankings")
             context["threat_sort"] = threat_sort
             context["threat_dir"] = threat_dir
             context["next_threat_dir"] = lambda requested_sort, default_dir="desc": _next_threat_dir(
@@ -325,10 +282,10 @@ def create_app():
             body = render_template("gui_rankings.html.j2", context)
             return html_response(start_response, body)
         if path == "/analysis":
-            body = render_template("gui_analysis.html.j2", view_context("analysis", action_message, selected_team, "/analysis"))
+            body = render_template("gui_analysis.html.j2", view_context("analysis", action_message, "/analysis"))
             return html_response(start_response, body)
         if path == "/ai-rankings":
-            context = view_context("ai_rankings", action_message, selected_team, "/ai-rankings")
+            context = view_context("ai_rankings", action_message, "/ai-rankings")
             context["threat_sort"] = threat_sort
             context["threat_dir"] = threat_dir
             context["next_threat_dir"] = lambda requested_sort, default_dir="desc": _next_threat_dir(
@@ -348,16 +305,16 @@ def create_app():
             body = render_template("gui_ai_rankings.html.j2", context)
             return html_response(start_response, body)
         if path == "/matches":
-            body = render_template("gui_matches.html.j2", view_context("matches", action_message, selected_team, "/matches"))
+            body = render_template("gui_matches.html.j2", view_context("matches", action_message, "/matches"))
             return html_response(start_response, body)
         if path == "/media":
-            body = render_template("gui_media.html.j2", view_context("media", action_message, selected_team, "/media"))
+            body = render_template("gui_media.html.j2", view_context("media", action_message, "/media"))
             return html_response(start_response, body)
         if path == "/history":
-            body = render_template("gui_history.html.j2", view_context("history", action_message, selected_team, "/history"))
+            body = render_template("gui_history.html.j2", view_context("history", action_message, "/history"))
             return html_response(start_response, body)
         if path == "/settings":
-            body = render_template("gui_settings.html.j2", view_context("settings", action_message, selected_team, "/settings"))
+            body = render_template("gui_settings.html.j2", view_context("settings", action_message, "/settings"))
             return html_response(start_response, body)
 
         body = f"<h1>404</h1><p>No route for {html.escape(path)}</p>".encode("utf-8")

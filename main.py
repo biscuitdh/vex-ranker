@@ -267,7 +267,7 @@ def _run_competition_cycle_unlocked(settings: Settings) -> dict[str, object]:
             )
             ai_rankings_by_team = _generate_ai_rankings_for_event_teams(connection, settings)
             ai_rankings = ai_rankings_by_team.get(settings.team_number) or {}
-            view = build_dashboard_view(connection, settings.team_number, settings)
+            view = build_dashboard_view(connection, settings.team_number, settings, include_operations=False)
             with httpx.Client(timeout=settings.request_timeout_seconds) as discord_client:
                 send_rank_alert(connection, settings, view["latest_snapshot"], view["delta"], client=discord_client)
                 send_power_rank_alert(connection, settings, view.get("team_power"), view.get("power_delta", {}), client=discord_client)
@@ -346,7 +346,7 @@ def write_reports(settings: Settings) -> dict[str, str]:
     with runtime_lock(settings.data_dir, "db-writer", timeout_seconds=180):
         with db_session(settings.db_path) as connection:
             init_db(connection)
-            view = build_dashboard_view(connection, settings.team_number, settings)
+            view = build_dashboard_view(connection, settings.team_number, settings, include_operations=False)
             markdown_path = write_markdown_report(settings.reports_dir, view)
             json_path = write_json_export(settings.reports_dir, view)
             return {"markdown": str(markdown_path), "json": str(json_path)}

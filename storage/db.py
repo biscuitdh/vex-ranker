@@ -2787,7 +2787,7 @@ def _match_progress_health(
 def _gui_surface_health(settings: Any) -> dict[str, Any]:
     """Return GUI reachability health."""
     checked_at = utc_now()
-    url = f"http://{settings.gui_host}:{settings.gui_port}/"
+    url = f"http://{settings.gui_host}:{settings.gui_port}/healthz"
     timeout = min(max(int(settings.request_timeout_seconds), 1), 2)
     try:
         with httpx.Client(timeout=timeout) as client:
@@ -3419,6 +3419,91 @@ def _hydrate_telemetry_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
     return hydrated
 
 
+def _local_critical_components_healthy(payload: dict[str, Any] | None) -> bool:
+    """Return whether the match-day critical components are healthy."""
+    if not payload:
+        return False
+    components = payload.get("components")
+    if not isinstance(components, dict):
+        return bool(payload.get("healthy"))
+    for name in ("data_pipeline", "match_progress", "gui_surface", "service_supervision"):
+        component = components.get(name)
+        if not isinstance(component, dict) or str(component.get("status") or "").lower() != "healthy":
+            return False
+    return True
+
+
+def _build_automation_summary(
+    dashboard_health: dict[str, Any] | None,
+    last_healthcheck: dict[str, Any] | None,
+    last_repair_attempt: dict[str, Any] | None,
+    last_restart_event: dict[str, Any] | None,
+    last_discord_request: dict[str, Any] | None,
+    pending_discord_requests: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Build one operator-friendly automation summary from raw telemetry."""
+    health = dashboard_health or {}
+    pending = pending_discord_requests or []
+    summary = {
+        "status": str(health.get("status") or "unknown"),
+        "headline": "Automation status is unavailable.",
+        "detail": str(health.get("reason_summary") or "No recent automation telemetry is available."),
+    }
+
+    if pending:
+        request = pending[0]
+        summary["status"] = "waiting"
+        summary["headline"] = f"Waiting for Discord approval on {request.get('request_id')}"
+        summary["detail"] = str(request.get("prompt_text") or "A remote approval is pending.")
+        return summary
+
+    repair_payload = ((last_repair_attempt or {}).get("payload") or {}) if last_repair_attempt else {}
+    repair_post_health = repair_payload.get("post_health") if isinstance(repair_payload, dict) else {}
+    if isinstance(repair_post_health, dict) and _local_critical_components_healthy(repair_post_health):
+        attempt_number = repair_payload.get("attempt_number") or (last_repair_attempt or {}).get("attempt_number") or "?"
+        summary["status"] = "recovered"
+        summary["headline"] = f"Recovered after repair attempt {attempt_number}"
+        degraded = []
+        for name in ("published_surface", "notification_path"):
+            component = (repair_post_health.get("components") or {}).get(name) if isinstance(repair_post_health.get("components"), dict) else None
+            if isinstance(component, dict) and str(component.get("status") or "").lower() == "degraded":
+                degraded.append(str(component.get("summary") or name))
+        if degraded:
+            summary["detail"] = "; ".join(degraded[:2])
+        else:
+            summary["detail"] = str(repair_post_health.get("reason_summary") or "Local match-day surfaces recovered cleanly.")
+        return summary
+
+    if last_restart_event and str(last_restart_event.get("status") or "").lower() in {"failed", "skipped"}:
+        summary["status"] = str(last_restart_event.get("status") or "restart")
+        summary["headline"] = "Repair exhausted before restart completed"
+        summary["detail"] = str(last_restart_event.get("reason_summary") or health.get("reason_summary") or "Managed restart was not completed.")
+        return summary
+
+    if str(health.get("status") or "").lower() == "healthy":
+        summary["status"] = "healthy"
+        summary["headline"] = "Automation is healthy"
+        checked_at = (last_healthcheck or {}).get("completed_at")
+        summary["detail"] = (
+            f"Last health check passed at {checked_at}."
+            if checked_at
+            else "Latest health checks are within threshold."
+        )
+        return summary
+
+    if last_discord_request and str(last_discord_request.get("status") or "").lower() in {"approved", "denied", "answered", "expired"}:
+        summary["status"] = str(last_discord_request.get("status") or "discord")
+        summary["headline"] = f"Latest Discord action: {str(last_discord_request.get('status') or 'unknown').title()}"
+        summary["detail"] = str(last_discord_request.get("response_text") or health.get("reason_summary") or "A Discord action was recently processed.")
+        return summary
+
+    if health:
+        summary["status"] = str(health.get("status") or "unknown")
+        summary["headline"] = f"Automation is {str(health.get('status') or 'unknown').title()}"
+        summary["detail"] = str(health.get("reason_summary") or "No concise reason is available.")
+    return summary
+
+
 def build_dashboard_view(
     connection: sqlite3.Connection,
     team_number: str = "7157B",
@@ -3463,6 +3548,18 @@ def build_dashboard_view(
     last_discord_request = get_latest_discord_request(connection) if include_operations else None
     last_discord_reply = get_latest_discord_reply(connection) if include_operations else None
     pending_discord_requests = get_pending_discord_requests(connection, limit=5) if include_operations else []
+    automation_summary = (
+        _build_automation_summary(
+            dashboard_health,
+            last_healthcheck,
+            last_repair_attempt,
+            last_restart_event,
+            last_discord_request,
+            pending_discord_requests,
+        )
+        if include_operations
+        else {}
+    )
     available_teams = get_available_teams(connection, team_number, limit=250)
     base_view = {
         "selected_team_number": team_number,
@@ -3497,6 +3594,7 @@ def build_dashboard_view(
         "matchup_summary": matchup_summary,
         "rankings_status": rankings_status,
         "dashboard_health": dashboard_health,
+        "automation_summary": automation_summary,
         "last_healthcheck": last_healthcheck,
         "last_repair_attempt": last_repair_attempt,
         "last_restart_event": last_restart_event,
@@ -3512,7 +3610,7 @@ def build_dashboard_view(
 
 def generate_ai_rankings_snapshot(connection: sqlite3.Connection, team_number: str = "7157B") -> dict[str, Any]:
     """Generate and persist the latest AI rankings snapshot for one team."""
-    view = build_dashboard_view(connection, team_number)
+    view = build_dashboard_view(connection, team_number, include_operations=False)
     payload = build_ai_rankings(view)
     record_ai_rankings_snapshot(connection, team_number, payload)
     view["ai_rankings"] = payload

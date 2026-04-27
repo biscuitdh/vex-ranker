@@ -2,6 +2,7 @@
 {% import "gui_primitives.html.j2" as ui %}
 {% set page_title = "Settings" %}
 {% block content %}
+  {% set automation = automation_summary if automation_summary is defined else {"status": "unknown", "headline": "Automation status unavailable.", "detail": ""} %}
   {% call ui.page_intro("Settings", "Effective Runtime Configuration", "What the process is actually using right now, including real source toggles and power-rank weights.") %}
     <a class="header-action" href="{{ '/' if not static_site else '../index.html' }}">Back To Dashboard</a>
   {% endcall %}
@@ -121,6 +122,8 @@
             <tr><th>Current Health</th><td>{{ dashboard_health.status|title }}</td></tr>
             <tr><th>Reason</th><td>{{ dashboard_health.reason_summary }}</td></tr>
           {% endif %}
+          <tr><th>Automation Summary</th><td>{{ automation.headline }}</td></tr>
+          <tr><th>Automation Detail</th><td>{{ automation.detail }}</td></tr>
           <tr><th>Last Repair</th><td>{{ last_repair_attempt.completed_at if last_repair_attempt else "Never" }}</td></tr>
           <tr><th>Last Restart</th><td>{{ last_restart_event.requested_at if last_restart_event else "Never" }}</td></tr>
           <tr><th>Last Discord Request</th><td>{{ last_discord_request.created_at if last_discord_request else "Never" }}</td></tr>

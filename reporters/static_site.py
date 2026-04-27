@@ -72,7 +72,7 @@ def _display_source_name(value: Any) -> str:
     return label.title()
 
 
-def _relative_href(page_key: str, current_key: str, team_number: str | None = None) -> str:
+def _relative_href(page_key: str, current_key: str) -> str:
     """Return a relative href from one exported page to another."""
     if current_key == "dashboard":
         prefix = ""
@@ -80,23 +80,18 @@ def _relative_href(page_key: str, current_key: str, team_number: str | None = No
         prefix = "../"
     target = PAGE_SPECS[page_key][0]
     if page_key == "dashboard":
-        href = f"{prefix}index.html"
-    else:
-        href = f"{prefix}{target[:-10]}/"
-    if team_number:
-        separator = "&" if "?" in href else "?"
-        return f"{href}{separator}team={team_number}"
-    return href
+        return f"{prefix}index.html"
+    return f"{prefix}{target[:-10]}/"
 
 
-def _nav_items(current_key: str, team_number: str | None = None) -> list[tuple[str, str, str]]:
+def _nav_items(current_key: str) -> list[tuple[str, str, str]]:
     """Build navigation links for the static site."""
     labels = {
         "dashboard": "Dashboard",
         "ai_rankings": "AI Rankings",
         "matches": "Matches",
     }
-    return [(key, _relative_href(key, current_key, team_number), labels[key]) for key in PAGE_SPECS]
+    return [(key, _relative_href(key, current_key), labels[key]) for key in PAGE_SPECS]
 
 
 def _status_banner(view: dict[str, Any]) -> dict[str, str]:

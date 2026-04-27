@@ -1435,6 +1435,80 @@ class DashboardHealthTests(unittest.TestCase):
                 self.assertEqual(health["components"]["gui_surface"]["status"], "healthy")
                 self.assertEqual(health["components"]["match_progress"]["status"], "healthy")
 
+    def test_build_dashboard_view_reports_recovered_automation_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                "os.environ",
+                {
+                    "BASE_DIR": tmp,
+                    "TIMEZONE": "UTC",
+                    "DASHBOARD_STALE_MINUTES": "5000000",
+                    "AI_RANKINGS_STALE_MINUTES": "5000000",
+                },
+                clear=True,
+            ):
+                settings = config.load_settings(env_file=None)
+                with db.db_session(settings.db_path) as connection:
+                    db.init_db(connection)
+                    _seed_healthy_dashboard_state(connection)
+                    db.record_healthcheck_run(
+                        connection,
+                        started_at=db.utc_now(),
+                        completed_at=db.utc_now(),
+                        status="degraded",
+                        reason_summary="Static site stale.",
+                        payload={
+                            "status": "degraded",
+                            "healthy": False,
+                            "reason_summary": "Static site stale.",
+                            "components": {
+                                "data_pipeline": {"status": "healthy"},
+                                "match_progress": {"status": "healthy"},
+                                "gui_surface": {"status": "healthy"},
+                                "service_supervision": {"status": "healthy"},
+                                "published_surface": {"status": "degraded", "summary": "Static site stale."},
+                                "notification_path": {"status": "healthy"},
+                            },
+                        },
+                    )
+                    db.record_repair_attempt(
+                        connection,
+                        healthcheck_run_id=1,
+                        attempt_number=1,
+                        started_at=db.utc_now(),
+                        completed_at=db.utc_now(),
+                        status="success",
+                        error_summary="",
+                        payload={
+                            "attempt_number": 1,
+                            "actions": ["competition", "ai_rankings", "reports", "static_site"],
+                            "errors": [],
+                            "post_health": {
+                                "status": "degraded",
+                                "healthy": False,
+                                "reason_summary": "Static site stale.",
+                                "components": {
+                                    "data_pipeline": {"status": "healthy"},
+                                    "match_progress": {"status": "healthy"},
+                                    "gui_surface": {"status": "healthy"},
+                                    "service_supervision": {"status": "healthy"},
+                                    "published_surface": {"status": "degraded", "summary": "Static site stale."},
+                                    "notification_path": {"status": "healthy"},
+                                },
+                            },
+                        },
+                    )
+                    with (
+                        patch("storage.db._gui_surface_health", return_value={"name": "gui_surface", "status": "healthy", "summary": "GUI healthy."}),
+                        patch("storage.db._published_surface_health", return_value={"name": "published_surface", "status": "degraded", "summary": "Static site stale."}),
+                        patch("storage.db._notification_path_health", return_value={"name": "notification_path", "status": "healthy", "summary": "Discord healthy."}),
+                        patch("storage.db._service_supervision_health", return_value={"name": "service_supervision", "status": "healthy", "summary": "Services healthy."}),
+                    ):
+                        view = db.build_dashboard_view(connection, settings.team_number, settings)
+                self.assertEqual(view["automation_summary"]["status"], "recovered")
+                self.assertIn("Recovered after repair attempt 1", view["automation_summary"]["headline"])
+                self.assertIn("Static site stale.", view["automation_summary"]["detail"])
+
     def test_evaluate_dashboard_health_reports_gui_failure_and_publish_degrade(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(
@@ -1894,6 +1968,7 @@ class DashboardHealthTests(unittest.TestCase):
                 with patch("storage.db.httpx.Client.get", side_effect=httpx.ConnectError("boom")):
                     component = db._gui_surface_health(settings)
                 self.assertEqual(component["status"], "failed")
+                self.assertTrue(str(component["details"]["url"]).endswith("/healthz"))
 
     def test_notification_path_health_reports_degraded_on_http_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

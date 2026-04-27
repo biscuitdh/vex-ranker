@@ -8,6 +8,7 @@
   {% set rankings = rankings_status if rankings_status is defined else {"rankings_count": 0} %}
   {% set analysis_view = analysis if analysis is defined else {"headline": "", "cards": []} %}
   {% set health = dashboard_health if dashboard_health is defined else {"status": "unknown", "freshness": {}} %}
+  {% set automation = automation_summary if automation_summary is defined else {"status": "unknown", "headline": "Automation status unavailable.", "detail": ""} %}
   {% if static_site %}
     {% call ui.page_intro("Public Snapshot", team_label ~ " Match Day", "A mobile-friendly scout view with the current read, recent impact, and the next known matches.") %}
       <div class="public-nav">
@@ -138,9 +139,12 @@
       <div class="summary-card">
         {{ ui.section_header("Automation", "Self-Heal Status", "Hourly health checks, repair attempts, and restart escalation. Less mysticism, more telemetry.") }}
         <div class="muted-panel">
-          <span class="badge health-{{ health.status or 'unknown' }}">{{ (health.status or "unknown")|title }}</span>
-          {% if health.reason_summary %}
-            <div style="margin-top: 10px;">{{ health.reason_summary }}</div>
+          <span class="badge health-{{ automation.status or health.status or 'unknown' }}">{{ (automation.status or health.status or "unknown")|title }}</span>
+          {% if automation.headline %}
+            <div style="margin-top: 10px;"><strong>{{ automation.headline }}</strong></div>
+          {% endif %}
+          {% if automation.detail %}
+            <div style="margin-top: 10px;">{{ automation.detail }}</div>
           {% endif %}
           {% if health.reasons %}
             <div class="small" style="margin-top: 10px;">Reasons: {{ "; ".join(health.reasons[:4]) }}</div>
