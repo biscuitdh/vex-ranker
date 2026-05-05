@@ -1,0 +1,40 @@
+{
+  "name": "vex-ranker",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@9.15.4",
+  "engines": {
+    "node": ">=24.0.0 <25.0.0",
+    "pnpm": "9.15.4"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @vex-ranker/web dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "test": "vitest run",
+    "db:migrate": "pnpm --filter @vex-ranker/db migrate",
+    "db:seed": "pnpm --filter @vex-ranker/db seed",
+    "worker:once": "pnpm --filter @vex-ranker/collector start -- --once",
+    "local:up": "docker compose up --build -d postgres mock-vex-api web",
+    "local:down": "docker compose down",
+    "local:reset": "docker compose down -v && docker compose up --build -d postgres mock-vex-api web",
+    "local:worker": "docker compose --profile jobs run --rm collector-once",
+    "local:scheduler": "docker compose --profile scheduler up --build collector-scheduler",
+    "local:test": "docker compose -f docker-compose.yml -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from test test",
+    "local:logs": "docker compose logs -f --tail=200",
+    "oci:config": "VEX_RANKER_ENV_FILE=./env.production.example docker compose --env-file deploy/oci/env.production.example -f deploy/oci/docker-compose.oci.yml config",
+    "oci:build": "VEX_RANKER_ENV_FILE=./env.production.example docker compose --env-file deploy/oci/env.production.example -f deploy/oci/docker-compose.oci.yml build web collector-scheduler migrate",
+    "oci:logs": "docker compose --env-file deploy/oci/.env.production -f deploy/oci/docker-compose.oci.yml logs -f --tail=200"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "postcss": "8.5.10"
+    }
+  }
+}

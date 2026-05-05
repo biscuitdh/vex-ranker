@@ -1,0 +1,10 @@
+FROM node:24-bookworm-slim
+
+WORKDIR /app
+COPY --chown=node:node workers/mock-vex-api ./workers/mock-vex-api
+
+ENV PORT=4010
+EXPOSE 4010
+
+USER node
+CMD ["node", "workers/mock-vex-api/src/server.mjs"]

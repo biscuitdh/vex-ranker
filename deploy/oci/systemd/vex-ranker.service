@@ -1,0 +1,17 @@
+[Unit]
+Description=VEX Ranker production stack
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/vex-ranker
+ExecStart=/usr/bin/docker compose --env-file deploy/oci/.env.production -f deploy/oci/docker-compose.oci.yml up -d
+ExecStop=/usr/bin/docker compose --env-file deploy/oci/.env.production -f deploy/oci/docker-compose.oci.yml down
+RemainAfterExit=yes
+User=ubuntu
+Group=ubuntu
+
+[Install]
+WantedBy=multi-user.target

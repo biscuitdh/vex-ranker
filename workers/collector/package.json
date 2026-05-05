@@ -1,0 +1,19 @@
+{
+  "name": "@vex-ranker/collector",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "start": "node --loader ts-node/esm src/cli.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@vex-ranker/db": "workspace:*",
+    "@vex-ranker/ranking-engine": "workspace:*",
+    "@vex-ranker/vex-client": "workspace:*",
+    "ts-node": "^10.9.2"
+  }
+}

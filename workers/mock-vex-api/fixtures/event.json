@@ -1,0 +1,19 @@
+{
+  "data": [
+    {
+      "id": 4025,
+      "sku": "RE-V5RC-26-4025",
+      "name": "2026 VEX Robotics World Championship",
+      "start": "2026-04-21T00:00:00Z",
+      "end": "2026-04-24T23:59:59Z",
+      "location": {
+        "city": "Dallas",
+        "region": "TX",
+        "country": "United States"
+      },
+      "divisions": [
+        { "id": 1, "name": "Technology" }
+      ]
+    }
+  ]
+}

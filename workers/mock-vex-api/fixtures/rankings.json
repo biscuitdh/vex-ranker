@@ -1,0 +1,64 @@
+{
+  "data": [
+    {
+      "rank": 1,
+      "wins": 6,
+      "losses": 0,
+      "ties": 0,
+      "wp": 12,
+      "ap": 42,
+      "sp": 168,
+      "average_score": 38,
+      "team": {
+        "number": "1234A",
+        "team_name": "Control Sample",
+        "organization": "Fixture Robotics"
+      }
+    },
+    {
+      "rank": 2,
+      "wins": 5,
+      "losses": 1,
+      "ties": 0,
+      "wp": 10,
+      "ap": 40,
+      "sp": 160,
+      "average_score": 34,
+      "team": {
+        "number": "7157B",
+        "team_name": "Mystery Machine",
+        "organization": "Chittenango High School, NY"
+      }
+    },
+    {
+      "rank": 3,
+      "wins": 4,
+      "losses": 2,
+      "ties": 0,
+      "wp": 8,
+      "ap": 35,
+      "sp": 141,
+      "average_score": 31,
+      "team": {
+        "number": "9999X",
+        "team_name": "Regression Testers",
+        "organization": "Local Fixture Lab"
+      }
+    },
+    {
+      "rank": 4,
+      "wins": 3,
+      "losses": 3,
+      "ties": 0,
+      "wp": 6,
+      "ap": 30,
+      "sp": 130,
+      "average_score": 28,
+      "team": {
+        "number": "8888B",
+        "team_name": "Offline Mode",
+        "organization": "Local Fixture Lab"
+      }
+    }
+  ]
+}

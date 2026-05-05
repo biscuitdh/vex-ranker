@@ -1,0 +1,54 @@
+{
+  "data": [
+    {
+      "id": 1001,
+      "name": "Q1",
+      "round": "Q",
+      "instance": 1,
+      "scheduled": "2026-04-21T12:00:00Z",
+      "started": "2026-04-21T12:15:00Z",
+      "field": { "name": "Google" },
+      "alliances": [
+        {
+          "score": 24,
+          "teams": [
+            { "team": { "number": "7157B" } },
+            { "team": { "number": "1234A" } }
+          ]
+        },
+        {
+          "score": 18,
+          "teams": [
+            { "team": { "number": "9999X" } },
+            { "team": { "number": "8888B" } }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 1002,
+      "name": "Q2",
+      "round": "Q",
+      "instance": 1,
+      "scheduled": "2026-04-21T13:00:00Z",
+      "started": null,
+      "field": { "name": "NASA" },
+      "alliances": [
+        {
+          "score": null,
+          "teams": [
+            { "team": { "number": "9999X" } },
+            { "team": { "number": "7157B" } }
+          ]
+        },
+        {
+          "score": null,
+          "teams": [
+            { "team": { "number": "8888B" } },
+            { "team": { "number": "1234A" } }
+          ]
+        }
+      ]
+    }
+  ]
+}

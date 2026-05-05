@@ -1,0 +1,11 @@
+[Unit]
+Description=Back up VEX Ranker Postgres
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/vex-ranker
+ExecStart=/opt/vex-ranker/deploy/oci/scripts/backup-postgres.sh
+User=ubuntu
+Group=ubuntu

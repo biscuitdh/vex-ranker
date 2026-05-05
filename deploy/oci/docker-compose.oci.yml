@@ -1,0 +1,93 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-vex}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-vexranker}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER:-vex}\" -d \"$${POSTGRES_DB:-vexranker}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks:
+      - internal
+    volumes:
+      - /opt/vex-ranker/postgres:/var/lib/postgresql/data
+
+  migrate:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.collector
+    env_file:
+      - ${VEX_RANKER_ENV_FILE:-./.env.production}
+    command: ["pnpm", "--filter", "@vex-ranker/db", "migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - internal
+    restart: "no"
+
+  web:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.web
+    restart: unless-stopped
+    env_file:
+      - ${VEX_RANKER_ENV_FILE:-./.env.production}
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - edge
+      - internal
+
+  collector-scheduler:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.collector
+    restart: unless-stopped
+    env_file:
+      - ${VEX_RANKER_ENV_FILE:-./.env.production}
+    command: ["pnpm", "--filter", "@vex-ranker/collector", "start", "--", "--source", "live"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - internal
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?set APP_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL}
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - web
+    networks:
+      - edge
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - /opt/vex-ranker/caddy/data:/data
+      - /opt/vex-ranker/caddy/config:/config
+
+networks:
+  edge:
+  internal:
+    internal: true

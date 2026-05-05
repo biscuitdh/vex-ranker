@@ -1,0 +1,27 @@
+FROM node:24-bookworm-slim
+
+WORKDIR /app
+ENV NEXT_TELEMETRY_DISABLED=1
+
+RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/web/package.json apps/web/package.json
+COPY packages/db/package.json packages/db/package.json
+COPY packages/ranking-engine/package.json packages/ranking-engine/package.json
+COPY packages/vex-client/package.json packages/vex-client/package.json
+COPY workers/collector/package.json workers/collector/package.json
+COPY workers/mock-vex-api/package.json workers/mock-vex-api/package.json
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
+    pnpm config set store-dir /pnpm/store && pnpm install --frozen-lockfile
+
+COPY . .
+RUN pnpm --filter @vex-ranker/web build
+RUN mkdir -p /pnpm && chown -R node:node /app /pnpm
+
+ENV NODE_ENV=production
+ENV PORT=3000
+EXPOSE 3000
+
+USER node
+CMD ["pnpm", "--filter", "@vex-ranker/web", "start"]

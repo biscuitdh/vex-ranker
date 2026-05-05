@@ -1,0 +1,21 @@
+services:
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.collector
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+      ROBOTEVENTS_API_BASE: http://mock-vex-api:4010/api/v2
+      MOCK_ROBOTEVENTS_API_BASE: http://mock-vex-api:4010/api/v2
+      ROBOTEVENTS_API_KEY: ${ROBOTEVENTS_API_KEY:?set ROBOTEVENTS_API_KEY}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN}
+      DEFAULT_EVENT_SKU: RE-V5RC-26-4025
+      DEFAULT_DIVISION_NAME: Technology
+      DEFAULT_TEAM_NUMBER: 7157B
+      COLLECTOR_SOURCE: mock
+    command: ["pnpm", "test"]
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      mock-vex-api:
+        condition: service_healthy

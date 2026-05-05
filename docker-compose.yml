@@ -1,0 +1,125 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: vex
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: vexranker
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vex -d vexranker"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  mock-vex-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.mock-vex-api
+    ports:
+      - "127.0.0.1:4010:4010"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4010/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.collector
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+    command: ["pnpm", "--filter", "@vex-ranker/db", "migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  seed:
+    build:
+      context: .
+      dockerfile: Dockerfile.collector
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+    command: ["pnpm", "--filter", "@vex-ranker/db", "seed"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+      ROBOTEVENTS_API_BASE: http://mock-vex-api:4010/api/v2
+      MOCK_ROBOTEVENTS_API_BASE: http://mock-vex-api:4010/api/v2
+      ROBOTEVENTS_API_KEY: ${ROBOTEVENTS_API_KEY:?set ROBOTEVENTS_API_KEY}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN}
+      DEFAULT_EVENT_SKU: RE-V5RC-26-4025
+      DEFAULT_DIVISION_NAME: Technology
+      DEFAULT_TEAM_NUMBER: 7157B
+      COLLECTOR_SOURCE: mock
+      REFRESH_LOCK_SECONDS: 300
+      ADMIN_RATE_LIMIT_REQUESTS: 5
+      ADMIN_RATE_LIMIT_WINDOW_SECONDS: 600
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      mock-vex-api:
+        condition: service_healthy
+
+  collector-once:
+    profiles: ["jobs"]
+    build:
+      context: .
+      dockerfile: Dockerfile.collector
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+      ROBOTEVENTS_API_BASE: http://mock-vex-api:4010/api/v2
+      MOCK_ROBOTEVENTS_API_BASE: http://mock-vex-api:4010/api/v2
+      ROBOTEVENTS_API_KEY: ${ROBOTEVENTS_API_KEY:?set ROBOTEVENTS_API_KEY}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN}
+      DEFAULT_EVENT_SKU: RE-V5RC-26-4025
+      DEFAULT_DIVISION_NAME: Technology
+      DEFAULT_TEAM_NUMBER: 7157B
+      COLLECTOR_SOURCE: mock
+    command: ["pnpm", "--filter", "@vex-ranker/collector", "start", "--", "--once", "--source", "mock"]
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      mock-vex-api:
+        condition: service_healthy
+
+  collector-scheduler:
+    profiles: ["scheduler"]
+    build:
+      context: .
+      dockerfile: Dockerfile.collector
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+      ROBOTEVENTS_API_BASE: http://mock-vex-api:4010/api/v2
+      MOCK_ROBOTEVENTS_API_BASE: http://mock-vex-api:4010/api/v2
+      ROBOTEVENTS_API_KEY: ${ROBOTEVENTS_API_KEY:?set ROBOTEVENTS_API_KEY}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN}
+      DEFAULT_EVENT_SKU: RE-V5RC-26-4025
+      DEFAULT_DIVISION_NAME: Technology
+      DEFAULT_TEAM_NUMBER: 7157B
+      COLLECTOR_SOURCE: mock
+      COLLECTOR_INTERVAL_SECONDS: 600
+    command: ["pnpm", "--filter", "@vex-ranker/collector", "start", "--", "--source", "mock"]
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      mock-vex-api:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
