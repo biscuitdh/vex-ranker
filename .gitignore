@@ -7,5 +7,6 @@ coverage
 .env.production
 deploy/oci/.env.production
 *.log
+*.tsbuildinfo
 .DS_Store
 postgres-data
